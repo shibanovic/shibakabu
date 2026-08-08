@@ -76,10 +76,13 @@ SECTOR_MAP_JP = {
 # データベース接続エンジン (Supabase / PostgreSQL)
 def get_engine():
     db = st.secrets["postgres"]
-    url = f"postgresql://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['dbname']}"
+    port = db.get("port", 5432)
+    if not port:
+        port = 5432
+    
+    # URLの末尾に ?sslmode=require を追加
+    url = f"postgresql://{db['user']}:{db['password']}@{db['host']}:{port}/{db['dbname']}?sslmode=require"
     return create_engine(url)
-
-engine = get_engine()
 
 
 # DBスキーマの自動アップデート（PostgreSQL用）
