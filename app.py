@@ -174,9 +174,14 @@ def fetch_market_indices():
 # RSI計算関数
 def calculate_rsi(series, period=14):
     delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+
+    # Wilderの平滑化（Yahoo!ファイナンス等が採用する標準的な方式）
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+
+    rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
 
@@ -235,7 +240,7 @@ def update_stock_prices_in_db(ticker, start_date, end_date=None):
         except Exception:
             end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    df = yf.download(ticker, start=start_date, end=end_date, progress=False)
+df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
     if df.empty:
         return False
     if isinstance(df.columns, pd.MultiIndex):
