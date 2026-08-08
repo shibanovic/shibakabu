@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-#1. 認証チェック用の関数（または判定ロジック）
+# 1. 認証チェック用の関数（または判定ロジック）
 def check_password():
     """パスワードが正しいかチェックする関数"""
     
@@ -318,12 +318,18 @@ def refresh_all_stocks_data():
         if update_stock_prices_in_db(ticker, start_date, end_date):
             try:
                 info = yf.Ticker(ticker).info
-                per = info.get("forwardPE") or info.get("trailingPE")
+                current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+                
+                # --- PERの乖離修正 ---
+                # yfinanceのPE数値をそのまま使わず、最新株価とEPSから再計算して精度を高める
+                eps = info.get("forwardEps") or info.get("trailingEps")
+                if current_price and eps and eps > 0:
+                    per = current_price / eps
+                else:
+                    per = info.get("forwardPE") or info.get("trailingPE")
+                
                 pbr = info.get("priceToBook")
-
-                current_price = info.get("currentPrice") or info.get(
-                    "regularMarketPrice"
-                )
+                
                 dividend_rate = info.get("dividendRate")
                 if dividend_rate and current_price:
                     div_yield = (dividend_rate / current_price) * 100
@@ -412,10 +418,18 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
         else SECTOR_MAP_JP.get(raw_sector, raw_sector)
     )
 
-    per = info.get("forwardPE") or info.get("trailingPE")
+    current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+
+    # --- PERの乖離修正 ---
+    # 最新株価とEPSから手動計算し、YahooファイナンスJPとの乖離を抑える
+    eps = info.get("forwardEps") or info.get("trailingEps")
+    if current_price and eps and eps > 0:
+        per = current_price / eps
+    else:
+        per = info.get("forwardPE") or info.get("trailingPE")
+        
     pbr = info.get("priceToBook")
 
-    current_price = info.get("currentPrice") or info.get("regularMarketPrice")
     dividend_rate = info.get("dividendRate")
     if dividend_rate and current_price:
         div_yield = (dividend_rate / current_price) * 100
