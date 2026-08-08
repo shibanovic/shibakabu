@@ -1,11 +1,11 @@
-# app.py (PER取得ロジック初版差し戻し版)
+# app.py (PostgreSQL / Supabase 完全移行版)
 import re
-import sqlite3
 import urllib.request
 from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+from sqlalchemy import create_engine, text
 
 # 1. 認証チェック用の関数（または判定ロジック）
 def check_password():
@@ -18,11 +18,10 @@ def check_password():
     # ログイン画面の表示
     st.subheader("🔒 ログインしてください")
     
-    # パスワード入力欄（st.text_inputでtype="password"にすると「●●●」になります）
+    # パスワード入力欄
     password = st.text_input("パスワード", type="password")
     
     if st.button("ログイン"):
-        # ここに設定したいパスワードを記述します（例: "shibakabu123"）
         if password == "3080":
             st.session_state["password_correct"] = True
             st.rerun()  # 画面を再読み込みしてアプリ本体を表示
@@ -74,23 +73,23 @@ SECTOR_MAP_JP = {
 }
 
 
-# データベース接続
-def get_connection():
-    return sqlite3.connect("stock_analysis.db")
+# データベース接続エンジン (Supabase / PostgreSQL)
+def get_engine():
+    db = st.secrets["postgres"]
+    url = f"postgresql://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['dbname']}"
+    return create_engine(url)
+
+engine = get_engine()
 
 
-# DBスキーマの自動アップデート
+# DBスキーマの自動アップデート（PostgreSQL用）
 def init_db_schema():
-    conn = get_connection()
-    cursor = conn.cursor()
-    for col in ["per REAL", "pbr REAL", "dividend_yield REAL", "roe REAL"]:
-        try:
-            cursor.execute(f"ALTER TABLE companies ADD COLUMN {col};")
-        except sqlite3.OperationalError:
-            pass
-    conn.commit()
-    conn.close()
-
+    with engine.begin() as conn:
+        for col_def in ["per DOUBLE PRECISION", "pbr DOUBLE PRECISION", "dividend_yield DOUBLE PRECISION", "roe DOUBLE PRECISION"]:
+            try:
+                conn.execute(text(f"ALTER TABLE companies ADD COLUMN IF NOT EXISTS {col_def};"))
+            except Exception:
+                pass
 
 init_db_schema()
 
@@ -171,7 +170,7 @@ def fetch_market_indices():
     return results
 
 
-# RSI計算関数（Wilderの平滑化：Yahoo!ファイナンス等が採用する標準方式）
+# RSI計算関数（Wilderの平滑化）
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = delta.where(delta > 0, 0.0)
@@ -184,10 +183,9 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 
-# 銘柄一覧・全指標の取得
+# 銘柄一覧・全指標の取得（PostgreSQL用 STRING_AGG 対応）
 @st.cache_data
 def load_companies():
-    conn = get_connection()
     query = """
     SELECT c.ticker, c.code, c.name, c.sector, c.per, c.pbr, c.dividend_yield, c.roe,
            latest_p.close AS latest_close,
@@ -195,7 +193,7 @@ def load_companies():
            latest_p.sma_25 AS latest_sma_25,
            latest_p.sma_75 AS latest_sma_75,
            latest_p.rsi_14 AS latest_rsi,
-           GROUP_CONCAT(t.name, ', ') AS themes
+           STRING_AGG(t.name, ', ') AS themes
     FROM companies c
     LEFT JOIN company_themes ct ON c.ticker = ct.ticker
     LEFT JOIN themes t ON ct.theme_id = t.theme_id
@@ -208,30 +206,24 @@ def load_companies():
             GROUP BY ticker
         ) dp2 ON dp1.ticker = dp2.ticker AND dp1.date = dp2.max_date
     ) latest_p ON c.ticker = latest_p.ticker
-    GROUP BY c.ticker
+    GROUP BY c.ticker, c.code, c.name, c.sector, c.per, c.pbr, c.dividend_yield, c.roe,
+             latest_p.close, latest_p.volume, latest_p.sma_25, latest_p.sma_75, latest_p.rsi_14, latest_p.date
     ORDER BY c.code ASC;
     """
-    df = pd.read_sql_query(query, conn)
-    conn.close()
+    df = pd.read_sql(query, engine)
     return df
 
 # テーマ一覧の取得
 def load_themes():
-    conn = get_connection()
-    df = pd.read_sql_query(
-        "SELECT theme_id, name FROM themes ORDER BY name ASC;", conn
-    )
-    conn.close()
+    df = pd.read_sql("SELECT theme_id, name FROM themes ORDER BY name ASC;", engine)
     return df
 
 
-# 単一銘柄の株価データをフェッチ＆DB保存
+# 単一銘柄の株価データをフェッチ＆DB保存（PostgreSQL ON CONFLICT 対応）
 def update_stock_prices_in_db(ticker, start_date, end_date=None):
-    # end_dateが指定されていない、または今日の日付の場合は「明日の日付」を指定して今日を含める
     if end_date is None:
         end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
     else:
-        # 指定されている場合も、当日を含めるために1日後ろにずらすか、翌日にする
         try:
             dt = datetime.strptime(end_date, "%Y-%m-%d")
             end_date = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -249,66 +241,67 @@ def update_stock_prices_in_db(ticker, start_date, end_date=None):
     df["sma_75"] = df["Close"].rolling(window=75).mean()
     df["rsi_14"] = calculate_rsi(df["Close"], 14)
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    for date, row in df.iterrows():
-        date_str = date.strftime("%Y-%m-%d")
+    with engine.begin() as conn:
+        for date, row in df.iterrows():
+            date_str = date.strftime("%Y-%m-%d")
 
-        def safe_val(val):
-            return None if pd.isna(val) else float(val)
+            def safe_val(val):
+                return None if pd.isna(val) else float(val)
 
-        cursor.execute(
-            """
-            INSERT OR REPLACE INTO daily_prices (
-                ticker, date, open, high, low, close, change_pct, volume, sma_25, sma_75, rsi_14
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-        """,
-            (
-                ticker,
-                date_str,
-                safe_val(row["Open"]),
-                safe_val(row["High"]),
-                safe_val(row["Low"]),
-                safe_val(row["Close"]),
-                safe_val(row["change_pct"]),
-                int(row["Volume"]) if not pd.isna(row["Volume"]) else 0,
-                safe_val(row["sma_25"]),
-                safe_val(row["sma_75"]),
-                safe_val(row["rsi_14"]),
-            ),
-        )
-    conn.commit()
-    conn.close()
+            conn.execute(
+                text("""
+                    INSERT INTO daily_prices (
+                        ticker, date, open, high, low, close, change_pct, volume, sma_25, sma_75, rsi_14
+                    ) VALUES (:ticker, :date, :open, :high, :low, :close, :change_pct, :volume, :sma_25, :sma_75, :rsi_14)
+                    ON CONFLICT (ticker, date) DO UPDATE SET 
+                        open = EXCLUDED.open,
+                        high = EXCLUDED.high,
+                        low = EXCLUDED.low,
+                        close = EXCLUDED.close,
+                        change_pct = EXCLUDED.change_pct,
+                        volume = EXCLUDED.volume,
+                        sma_25 = EXCLUDED.sma_25,
+                        sma_75 = EXCLUDED.sma_75,
+                        rsi_14 = EXCLUDED.rsi_14;
+                """),
+                {
+                    "ticker": ticker,
+                    "date": date_str,
+                    "open": safe_val(row.get("Open")),
+                    "high": safe_val(row.get("High")),
+                    "low": safe_val(row.get("Low")),
+                    "close": safe_val(row.get("Close")),
+                    "change_pct": safe_val(row.get("change_pct")),
+                    "volume": int(row["Volume"]) if ("Volume" in row and not pd.isna(row["Volume"])) else 0,
+                    "sma_25": safe_val(row.get("sma_25")),
+                    "sma_75": safe_val(row.get("sma_75")),
+                    "rsi_14": safe_val(row.get("rsi_14")),
+                },
+            )
     return True
 
 
 # 全銘柄の株価および指標を一括更新
 def refresh_all_stocks_data():
-    conn = get_connection()
-    tickers = pd.read_sql_query("SELECT ticker FROM companies;", conn)[
-        "ticker"
-    ].tolist()
-    conn.close()
+    tickers_df = pd.read_sql("SELECT ticker FROM companies;", engine)
+    tickers = tickers_df["ticker"].tolist()
     if not tickers:
         return 0, "登録されている銘柄がありません。"
 
     success_count = 0
-    # 終了日に「明日」を指定して、今日（最新）のデータまで確実に取得する
     end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
 
     for ticker in tickers:
-        conn = get_connection()
-        last_date_df = pd.read_sql_query(
-            "SELECT MAX(date) as max_date FROM daily_prices WHERE ticker = ?;",
-            conn,
-            params=(ticker,),
+        last_date_df = pd.read_sql(
+            text("SELECT MAX(date) as max_date FROM daily_prices WHERE ticker = :ticker;"),
+            engine,
+            params={"ticker": ticker},
         )
-        conn.close()
 
-        max_date = last_date_df["max_date"].iloc[0]
+        max_date = last_date_df["max_date"].iloc[0] if not last_date_df.empty else None
         if max_date:
             start_date = (
-                datetime.strptime(max_date, "%Y-%m-%d") - timedelta(days=120)
+                datetime.strptime(str(max_date), "%Y-%m-%d") - timedelta(days=120)
             ).strftime("%Y-%m-%d")
         else:
             start_date = (datetime.today() - timedelta(days=730)).strftime(
@@ -319,10 +312,7 @@ def refresh_all_stocks_data():
             try:
                 info = yf.Ticker(ticker).info
                 current_price = info.get("currentPrice") or info.get("regularMarketPrice")
-                
-                # PERはyfinanceの計算済みの数値をそのまま取得する（初版のロジック）
                 per = info.get("forwardPE") or info.get("trailingPE")
-                
                 pbr = info.get("priceToBook")
                 
                 dividend_rate = info.get("dividendRate")
@@ -347,16 +337,13 @@ def refresh_all_stocks_data():
                     )
                 )
 
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    UPDATE companies SET per = ?, pbr = ?, dividend_yield = ?, roe = ? WHERE ticker = ?;
-                """,
-                    (per, pbr, div_yield, roe, ticker),
-                )
-                conn.commit()
-                conn.close()
+                with engine.begin() as conn:
+                    conn.execute(
+                        text("""
+                            UPDATE companies SET per = :per, pbr = :pbr, dividend_yield = :div_yield, roe = :roe WHERE ticker = :ticker;
+                        """),
+                        {"per": per, "pbr": pbr, "div_yield": div_yield, "roe": roe, "ticker": ticker}
+                    )
             except Exception:
                 pass
             success_count += 1
@@ -374,18 +361,15 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
     ticker = f"{clean_code}.T" if not clean_code.endswith(".T") else clean_code
     code = clean_code.replace(".T", "")
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT name FROM companies WHERE ticker = ? or code = ?;",
-        (ticker, code),
+    existing_df = pd.read_sql(
+        text("SELECT name FROM companies WHERE ticker = :ticker OR code = :code;"),
+        engine,
+        params={"ticker": ticker, "code": code}
     )
-    existing = cursor.fetchone()
-    conn.close()
-    if existing:
+    if not existing_df.empty:
         return (
             False,
-            f"⚠️ 銘柄コード【{code}】（{existing[0]}）はすでに登録されています。",
+            f"⚠️ 銘柄コード【{code}】（{existing_df['name'].iloc[0]}）はすでに登録されています。",
         )
 
     yf_obj = yf.Ticker(ticker)
@@ -414,10 +398,7 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
     )
 
     current_price = info.get("currentPrice") or info.get("regularMarketPrice")
-
-    # PERはyfinanceの計算済みの数値をそのまま取得する（初版のロジック）
     per = info.get("forwardPE") or info.get("trailingPE")
-        
     pbr = info.get("priceToBook")
 
     dividend_rate = info.get("dividendRate")
@@ -434,17 +415,31 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
     raw_roe = info.get("returnOnEquity")
     roe = raw_roe * 100 if raw_roe is not None else None
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT OR REPLACE INTO companies (ticker, code, name, sector, per, pbr, dividend_yield, roe)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
-    """,
-        (ticker, code, name, sector, per, pbr, div_yield, roe),
-    )
-    conn.commit()
-    conn.close()
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO companies (ticker, code, name, sector, per, pbr, dividend_yield, roe)
+                VALUES (:ticker, :code, :name, :sector, :per, :pbr, :div_yield, :roe)
+                ON CONFLICT (ticker) DO UPDATE SET
+                    code = EXCLUDED.code,
+                    name = EXCLUDED.name,
+                    sector = EXCLUDED.sector,
+                    per = EXCLUDED.per,
+                    pbr = EXCLUDED.pbr,
+                    dividend_yield = EXCLUDED.dividend_yield,
+                    roe = EXCLUDED.roe;
+            """),
+            {
+                "ticker": ticker,
+                "code": code,
+                "name": name,
+                "sector": sector,
+                "per": per,
+                "pbr": pbr,
+                "div_yield": div_yield,
+                "roe": roe,
+            },
+        )
 
     end_date = datetime.today().strftime("%Y-%m-%d")
     start_date = (datetime.today() - timedelta(days=730)).strftime("%Y-%m-%d")
@@ -458,29 +453,27 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
 
 # ポートフォリオ計算ロジック
 def calculate_portfolio_and_summary():
-    conn = get_connection()
-    tx_df = pd.read_sql_query(
-        """
-        SELECT t.transaction_id, t.ticker, c.code, c.name, t.type, t.trade_date, t.price, t.quantity, t.memo
-        FROM transactions t
-        JOIN companies c ON t.ticker = c.ticker
-        ORDER BY t.trade_date ASC, t.transaction_id ASC;
-    """,
-        conn,
+    tx_df = pd.read_sql(
+        text("""
+            SELECT t.transaction_id, t.ticker, c.code, c.name, t.type, t.trade_date, t.price, t.quantity, t.memo
+            FROM transactions t
+            JOIN companies c ON t.ticker = c.ticker
+            ORDER BY t.trade_date ASC, t.transaction_id ASC;
+        """),
+        engine,
     )
-    latest_prices = pd.read_sql_query(
-        """
-        SELECT dp.ticker, dp.close
-        FROM daily_prices dp
-        INNER JOIN (
-            SELECT ticker, MAX(date) as max_date
-            FROM daily_prices
-            GROUP BY ticker
-        ) latest ON dp.ticker = latest.ticker AND dp.date = latest.max_date;
-    """,
-        conn,
+    latest_prices = pd.read_sql(
+        text("""
+            SELECT dp.ticker, dp.close
+            FROM daily_prices dp
+            INNER JOIN (
+                SELECT ticker, MAX(date) as max_date
+                FROM daily_prices
+                GROUP BY ticker
+            ) latest ON dp.ticker = latest.ticker AND dp.date = latest.max_date;
+        """),
+        engine,
     )
-    conn.close()
 
     if tx_df.empty:
         return pd.DataFrame(), 0.0, 0.0, 0.0, tx_df
@@ -572,7 +565,6 @@ if "selected_stock_label" not in st.session_state:
 if "nav_radio" not in st.session_state:
     st.session_state["nav_radio"] = "📈 株価・テクニカル分析"
 
-# ★追加：ページ遷移のリクエストがある場合、ウィジェット生成前に反映する
 if "requested_page" in st.session_state:
     st.session_state["nav_radio"] = st.session_state["requested_page"]
     del st.session_state["requested_page"]
@@ -593,7 +585,7 @@ if market_data:
 st.divider()
 
 # ----------------------------------------------------
-# サイドバー設定（ウィジェット作成前に nav_radio を制御）
+# サイドバー設定
 # ----------------------------------------------------
 st.sidebar.title("🐶 しばかぶ メニュー")
 
@@ -603,7 +595,6 @@ if st.sidebar.button("🔄 全銘柄の株価・指標を更新"):
         st.sidebar.success(msg)
         st.rerun()
 
-# サイドバーのラジオボタンを表示
 page = st.sidebar.radio(
     "機能を選択:",
     [
@@ -666,16 +657,14 @@ if page == "📈 株価・テクニカル分析":
                 companies_df["ticker"] == selected_ticker
             ].iloc[0]
 
-            conn = get_connection()
-            df_prices = pd.read_sql_query(
-                """
-                SELECT date, open, high, low, close, change_pct, volume, sma_25, sma_75, rsi_14
-                FROM daily_prices WHERE ticker = ? ORDER BY date ASC;
-            """,
-                conn,
-                params=(selected_ticker,),
+            df_prices = pd.read_sql(
+                text("""
+                    SELECT date, open, high, low, close, change_pct, volume, sma_25, sma_75, rsi_14
+                    FROM daily_prices WHERE ticker = :ticker ORDER BY date ASC;
+                """),
+                engine,
+                params={"ticker": selected_ticker},
             )
-            conn.close()
 
             if not df_prices.empty:
                 latest = df_prices.iloc[-1]
@@ -987,7 +976,6 @@ elif page == "🔍 詳細検索（スクリーナー）":
                 cols = st.columns([1, 2.5, 1.2, 1, 1, 1, 1.2, 1, 1.2, 1.5])
                 cols[0].write(f"{row['code']}")
 
-                # 銘柄名クリック時（requested_page を経由するように修正）
                 if cols[1].button(
                     f"🔗 {row['name']}",
                     key=f"btn_nav_{row['code']}",
@@ -1114,24 +1102,21 @@ elif page == "💼 ポートフォリオ＆売買管理":
 
                 if submit:
                     ticker = company_dict[selected_comp]
-                    conn = get_connection()
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        """
-                        INSERT INTO transactions (ticker, type, trade_date, price, quantity, memo)
-                        VALUES (?, ?, ?, ?, ?, ?);
-                    """,
-                        (
-                            ticker,
-                            tx_type,
-                            str(trade_date),
-                            price,
-                            quantity,
-                            memo,
-                        ),
-                    )
-                    conn.commit()
-                    conn.close()
+                    with engine.begin() as conn:
+                        conn.execute(
+                            text("""
+                                INSERT INTO transactions (ticker, type, trade_date, price, quantity, memo)
+                                VALUES (:ticker, :type, :trade_date, :price, :quantity, :memo);
+                            """),
+                            {
+                                "ticker": ticker,
+                                "type": tx_type,
+                                "trade_date": str(trade_date),
+                                "price": price,
+                                "quantity": quantity,
+                                "memo": memo,
+                            },
+                        )
                     st.success("✅ 取引ログを保存しました！")
                     st.rerun()
 
@@ -1171,14 +1156,11 @@ elif page == "💼 ポートフォリオ＆売買管理":
                 "削除したい取引の 取引ID を入力", min_value=1, step=1
             )
             if st.button("取引を削除する"):
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute(
-                    "DELETE FROM transactions WHERE transaction_id = ?;",
-                    (del_id,),
-                )
-                conn.commit()
-                conn.close()
+                with engine.begin() as conn:
+                    conn.execute(
+                        text("DELETE FROM transactions WHERE transaction_id = :del_id;"),
+                        {"del_id": del_id}
+                    )
                 st.success(f"ID: {del_id} の取引を削除しました。")
                 st.rerun()
         else:
@@ -1243,13 +1225,11 @@ elif page == "⚙️ 銘柄登録・管理":
                 companies_df["ticker"] == selected_edit_ticker
             ].iloc[0]
 
-            conn = get_connection()
-            cur_themes_df = pd.read_sql_query(
-                "SELECT theme_id FROM company_themes WHERE ticker = ?;",
-                conn,
-                params=(selected_edit_ticker,),
+            cur_themes_df = pd.read_sql(
+                text("SELECT theme_id FROM company_themes WHERE ticker = :ticker;"),
+                engine,
+                params={"ticker": selected_edit_ticker},
             )
-            conn.close()
             current_theme_ids = cur_themes_df["theme_id"].tolist()
 
             with st.form("edit_company_form"):
@@ -1274,24 +1254,21 @@ elif page == "⚙️ 銘柄登録・管理":
                 update_btn = st.form_submit_button("💾 変更内容を保存")
 
                 if update_btn:
-                    conn = get_connection()
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "UPDATE companies SET name = ?, sector = ? WHERE ticker = ?;",
-                        (e_name, e_sector, selected_edit_ticker),
-                    )
-                    cursor.execute(
-                        "DELETE FROM company_themes WHERE ticker = ?;",
-                        (selected_edit_ticker,),
-                    )
-                    for t_name in selected_theme_names:
-                        t_id = theme_options[t_name]
-                        cursor.execute(
-                            "INSERT INTO company_themes (ticker, theme_id) VALUES (?, ?);",
-                            (selected_edit_ticker, t_id),
+                    with engine.begin() as conn:
+                        conn.execute(
+                            text("UPDATE companies SET name = :name, sector = :sector WHERE ticker = :ticker;"),
+                            {"name": e_name, "sector": e_sector, "ticker": selected_edit_ticker}
                         )
-                    conn.commit()
-                    conn.close()
+                        conn.execute(
+                            text("DELETE FROM company_themes WHERE ticker = :ticker;"),
+                            {"ticker": selected_edit_ticker}
+                        )
+                        for t_name in selected_theme_names:
+                            t_id = theme_options[t_name]
+                            conn.execute(
+                                text("INSERT INTO company_themes (ticker, theme_id) VALUES (:ticker, :theme_id);"),
+                                {"ticker": selected_edit_ticker, "theme_id": t_id}
+                            )
 
                     st.cache_data.clear()
                     st.success("✅ 保存完了しました！")
@@ -1310,20 +1287,16 @@ elif page == "⚙️ 銘柄登録・管理":
 
             if add_theme_btn:
                 if new_theme_name.strip():
-                    conn = get_connection()
-                    cursor = conn.cursor()
                     try:
-                        cursor.execute(
-                            "INSERT INTO themes (name, description) VALUES (?, ?);",
-                            (new_theme_name.strip(), theme_desc.strip()),
-                        )
-                        conn.commit()
+                        with engine.begin() as conn:
+                            conn.execute(
+                                text("INSERT INTO themes (name, description) VALUES (:name, :description);"),
+                                {"name": new_theme_name.strip(), "description": theme_desc.strip()}
+                            )
                         st.success(f"テーマ '{new_theme_name}' を追加しました！")
                         st.rerun()
-                    except sqlite3.IntegrityError:
-                        st.error("そのテーマ名は既に存在します。")
-                    finally:
-                        conn.close()
+                    except Exception:
+                        st.error("そのテーマ名は既に存在します（またはエラーが発生しました）。")
 
     with tab4:
         st.subheader("現在登録されている銘柄")
@@ -1369,14 +1342,11 @@ elif page == "⚙️ 銘柄登録・管理":
             selected_del_ticker = del_company_options[selected_del_label]
 
             if st.button("❌ 選択した銘柄をDBから削除する"):
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute(
-                    "DELETE FROM companies WHERE ticker = ?;",
-                    (selected_del_ticker,),
-                )
-                conn.commit()
-                conn.close()
+                with engine.begin() as conn:
+                    conn.execute(
+                        text("DELETE FROM companies WHERE ticker = :ticker;"),
+                        {"ticker": selected_del_ticker}
+                    )
                 st.cache_data.clear()
                 st.success(f"銘柄（{selected_del_ticker}）を削除しました。")
                 st.rerun()
