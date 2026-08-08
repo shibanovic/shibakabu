@@ -1,4 +1,4 @@
-# app.py (ページ遷移エラー修正版)
+# app.py (PER・配当利回り修正版)
 import re
 import sqlite3
 import urllib.request
@@ -171,13 +171,12 @@ def fetch_market_indices():
     return results
 
 
-# RSI計算関数
+# RSI計算関数（Wilderの平滑化：Yahoo!ファイナンス等が採用する標準方式）
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
 
-    # Wilderの平滑化（Yahoo!ファイナンス等が採用する標準的な方式）
     avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
     avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
 
@@ -185,7 +184,6 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 
-# 銘柄一覧・全指標の取得
 # 銘柄一覧・全指標の取得（修正版）
 @st.cache_data
 def load_companies():
@@ -320,14 +318,23 @@ def refresh_all_stocks_data():
         if update_stock_prices_in_db(ticker, start_date, end_date):
             try:
                 info = yf.Ticker(ticker).info
-                per = info.get("trailingPE")
+                per = info.get("forwardPE") or info.get("trailingPE")
                 pbr = info.get("priceToBook")
-                raw_div = info.get("dividendYield")
-                div_yield = (
-                    (raw_div * 100 if raw_div < 1.0 else raw_div)
-                    if raw_div
-                    else 0.0
+
+                current_price = info.get("currentPrice") or info.get(
+                    "regularMarketPrice"
                 )
+                dividend_rate = info.get("dividendRate")
+                if dividend_rate and current_price:
+                    div_yield = (dividend_rate / current_price) * 100
+                else:
+                    raw_div = info.get("dividendYield")
+                    div_yield = (
+                        (raw_div * 100 if raw_div and raw_div < 1.0 else raw_div)
+                        if raw_div
+                        else 0.0
+                    )
+
                 raw_roe = info.get("returnOnEquity")
                 roe = (
                     raw_roe * 100
@@ -405,12 +412,21 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
         else SECTOR_MAP_JP.get(raw_sector, raw_sector)
     )
 
-    per = info.get("trailingPE")
+    per = info.get("forwardPE") or info.get("trailingPE")
     pbr = info.get("priceToBook")
-    raw_div = info.get("dividendYield")
-    div_yield = (
-        (raw_div * 100 if raw_div < 1.0 else raw_div) if raw_div else 0.0
-    )
+
+    current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+    dividend_rate = info.get("dividendRate")
+    if dividend_rate and current_price:
+        div_yield = (dividend_rate / current_price) * 100
+    else:
+        raw_div = info.get("dividendYield")
+        div_yield = (
+            (raw_div * 100 if raw_div and raw_div < 1.0 else raw_div)
+            if raw_div
+            else 0.0
+        )
+
     raw_roe = info.get("returnOnEquity")
     roe = raw_roe * 100 if raw_roe is not None else None
 
