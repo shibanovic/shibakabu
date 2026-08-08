@@ -1,4 +1,4 @@
-# app.py (PostgreSQL / Supabase 完全移行版)
+# app.py (PostgreSQL / Supabase 完全対応・修正済み版)
 import re
 import urllib.request
 from datetime import datetime, timedelta
@@ -7,32 +7,26 @@ import streamlit as st
 import yfinance as yf
 from sqlalchemy import create_engine, text
 
-# 1. 認証チェック用の関数（または判定ロジック）
+# 1. 認証チェック用の関数
 def check_password():
     """パスワードが正しいかチェックする関数"""
-    
-    # ログイン済みの場合はそのまま通す
     if st.session_state.get("password_correct", False):
         return True
 
-    # ログイン画面の表示
     st.subheader("🔒 ログインしてください")
-    
-    # パスワード入力欄
     password = st.text_input("パスワード", type="password")
     
     if st.button("ログイン"):
         if password == "3080":
             st.session_state["password_correct"] = True
-            st.rerun()  # 画面を再読み込みしてアプリ本体を表示
+            st.rerun()
         else:
             st.error("パスワードが違います")
             
     return False
 
-# 2. 最初にパスワードチェックを実行
 if not check_password():
-    st.stop()  # パスワードが合致するまでは、これ以降のアプリのコードを読み込まない
+    st.stop()
     
 # ページ設定
 st.set_page_config(
@@ -79,10 +73,12 @@ def get_engine():
     port = db.get("port", 5432)
     if not port:
         port = 5432
-    
-    # URLの末尾に ?sslmode=require を追加
+    # SSL通信（sslmode=require）を追加
     url = f"postgresql://{db['user']}:{db['password']}@{db['host']}:{port}/{db['dbname']}?sslmode=require"
     return create_engine(url)
+
+# ★エラー対策：他の処理より先に engine を確実に生成します
+engine = get_engine()
 
 
 # DBスキーマの自動アップデート（PostgreSQL用）
