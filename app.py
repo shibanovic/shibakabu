@@ -7,6 +7,34 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
+#1. 認証チェック用の関数（または判定ロジック）
+def check_password():
+    """パスワードが正しいかチェックする関数"""
+    
+    # ログイン済みの場合はそのまま通す
+    if st.session_state.get("password_correct", False):
+        return True
+
+    # ログイン画面の表示
+    st.subheader("🔒 ログインしてください")
+    
+    # パスワード入力欄（st.text_inputでtype="password"にすると「●●●」になります）
+    password = st.text_input("パスワード", type="password")
+    
+    if st.button("ログイン"):
+        # ここに設定したいパスワードを記述します（例: "shibakabu123"）
+        if password == "3080":
+            st.session_state["password_correct"] = True
+            st.rerun()  # 画面を再読み込みしてアプリ本体を表示
+        else:
+            st.error("パスワードが違います")
+            
+    return False
+
+# 2. 最初にパスワードチェックを実行
+if not check_password():
+    st.stop()  # パスワードが合致するまでは、これ以降のアプリのコードを読み込まない
+    
 # ページ設定
 st.set_page_config(
     page_title="しばかぶ 🐶 - 株価分析＆ポートフォリオ管理",
