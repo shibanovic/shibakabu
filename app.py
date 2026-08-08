@@ -1,4 +1,4 @@
-# app.py (PER・配当利回り修正版)
+# app.py (PER取得ロジック初版差し戻し版)
 import re
 import sqlite3
 import urllib.request
@@ -184,7 +184,7 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 
-# 銘柄一覧・全指標の取得（修正版）
+# 銘柄一覧・全指標の取得
 @st.cache_data
 def load_companies():
     conn = get_connection()
@@ -225,7 +225,7 @@ def load_themes():
     return df
 
 
-# 単一銘柄の株価データをフェッチ＆DB保存（修正版）
+# 単一銘柄の株価データをフェッチ＆DB保存
 def update_stock_prices_in_db(ticker, start_date, end_date=None):
     # end_dateが指定されていない、または今日の日付の場合は「明日の日付」を指定して今日を含める
     if end_date is None:
@@ -282,7 +282,7 @@ def update_stock_prices_in_db(ticker, start_date, end_date=None):
     return True
 
 
-# 全銘柄の株価および指標を一括更新（修正版）
+# 全銘柄の株価および指標を一括更新
 def refresh_all_stocks_data():
     conn = get_connection()
     tickers = pd.read_sql_query("SELECT ticker FROM companies;", conn)[
@@ -320,13 +320,8 @@ def refresh_all_stocks_data():
                 info = yf.Ticker(ticker).info
                 current_price = info.get("currentPrice") or info.get("regularMarketPrice")
                 
-                # --- PERの乖離修正 ---
-                # yfinanceのPE数値をそのまま使わず、最新株価とEPSから再計算して精度を高める
-                eps = info.get("forwardEps") or info.get("trailingEps")
-                if current_price and eps and eps > 0:
-                    per = current_price / eps
-                else:
-                    per = info.get("forwardPE") or info.get("trailingPE")
+                # PERはyfinanceの計算済みの数値をそのまま取得する（初版のロジック）
+                per = info.get("forwardPE") or info.get("trailingPE")
                 
                 pbr = info.get("priceToBook")
                 
@@ -420,13 +415,8 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
 
     current_price = info.get("currentPrice") or info.get("regularMarketPrice")
 
-    # --- PERの乖離修正 ---
-    # 最新株価とEPSから手動計算し、YahooファイナンスJPとの乖離を抑える
-    eps = info.get("forwardEps") or info.get("trailingEps")
-    if current_price and eps and eps > 0:
-        per = current_price / eps
-    else:
-        per = info.get("forwardPE") or info.get("trailingPE")
+    # PERはyfinanceの計算済みの数値をそのまま取得する（初版のロジック）
+    per = info.get("forwardPE") or info.get("trailingPE")
         
     pbr = info.get("priceToBook")
 
