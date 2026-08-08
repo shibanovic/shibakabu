@@ -240,7 +240,7 @@ def update_stock_prices_in_db(ticker, start_date, end_date=None):
         except Exception:
             end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
+    df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
     if df.empty:
         return False
     if isinstance(df.columns, pd.MultiIndex):
