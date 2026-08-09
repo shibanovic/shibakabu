@@ -1,4 +1,4 @@
-# app.py (型エラー対策・休日対応を網羅した完全版)
+# app.py (上昇トレンド検知機能を追加した完全版)
 import re
 import urllib.request
 from datetime import datetime, timedelta
@@ -191,17 +191,23 @@ def load_companies():
     else:
         df_c["themes"] = ""
 
-    # 株価最新データの取得と結合
+    # 株価最新データおよび20日平均出来高の計算と結合
     res_dp = supabase.table("daily_prices").select("ticker, close, volume, sma_25, sma_75, rsi_14, date").execute()
     df_dp = pd.DataFrame(res_dp.data)
 
     if not df_dp.empty:
         df_dp["date"] = pd.to_datetime(df_dp["date"])
+        df_dp = df_dp.sort_values(["ticker", "date"])
+        df_dp["vol_sma_20"] = df_dp.groupby("ticker")["volume"].transform(
+            lambda x: x.rolling(window=20, min_periods=1).mean()
+        )
+
         idx = df_dp.groupby("ticker")["date"].idxmax()
         latest_dp = df_dp.loc[idx].copy()
         latest_dp.rename(columns={
             "close": "latest_close",
             "volume": "latest_volume",
+            "vol_sma_20": "latest_vol_sma_20",
             "sma_25": "latest_sma_25",
             "sma_75": "latest_sma_75",
             "rsi_14": "latest_rsi"
@@ -211,12 +217,17 @@ def load_companies():
     else:
         df_c["latest_close"] = None
         df_c["latest_volume"] = None
+        df_c["latest_vol_sma_20"] = None
         df_c["latest_sma_25"] = None
         df_c["latest_sma_75"] = None
         df_c["latest_rsi"] = None
 
-    # 💡 【重要】数値カラムを強制的に数値型（float/int）に変換し、型不整合エラーを防ぐ
-    numeric_cols = ["per", "pbr", "roe", "dividend_yield", "latest_close", "latest_volume", "latest_sma_25", "latest_sma_75", "latest_rsi"]
+    # 数値カラムを強制的に数値型（float/int）に変換
+    numeric_cols = [
+        "per", "pbr", "roe", "dividend_yield", 
+        "latest_close", "latest_volume", "latest_vol_sma_20", 
+        "latest_sma_25", "latest_sma_75", "latest_rsi"
+    ]
     for col in numeric_cols:
         if col in df_c.columns:
             df_c[col] = pd.to_numeric(df_c[col], errors="coerce")
@@ -233,7 +244,7 @@ def load_themes():
     return pd.DataFrame(res.data)
 
 
-# 単一銘柄の株価データをフェッチ＆DB保存（休日対策・リアルタイムPER/PBR更新対応）
+# 単一銘柄の株価データをフェッチ＆DB保存
 def update_stock_prices_in_db(ticker, start_date, end_date=None):
     if end_date is None:
         end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -577,6 +588,7 @@ page = st.sidebar.radio(
     [
         "📈 株価・テクニカル分析",
         "🔍 詳細検索（スクリーナー）",
+        "🔥 上昇トレンド検知",
         "💼 ポートフォリオ＆売買管理",
         "⚙️ 銘柄登録・管理",
     ],
@@ -661,7 +673,6 @@ if page == "📈 株価・テクニカル分析":
             res_p = supabase.table("daily_prices").select("date, open, high, low, close, change_pct, volume, sma_25, sma_75, rsi_14").eq("ticker", selected_ticker).order("date").execute()
             df_prices = pd.DataFrame(res_p.data)
 
-            # 価格・テクニカル指標の数値キャスト
             for col in ["close", "sma_25", "sma_75", "rsi_14", "change_pct", "volume"]:
                 if col in df_prices.columns:
                     df_prices[col] = pd.to_numeric(df_prices[col], errors="coerce")
@@ -809,7 +820,6 @@ elif page == "🔍 詳細検索（スクリーナー）":
                 how="left"
             )
 
-        # 💡 【重要】スクリーニング用データフレームの数値カラムも確実に数値型へ変換
         for col in ["per", "pbr", "roe", "dividend_yield", "latest_close", "latest_volume", "latest_sma_25", "latest_sma_75", "latest_rsi"]:
             if col in res_df.columns:
                 res_df[col] = pd.to_numeric(res_df[col], errors="coerce")
@@ -1043,7 +1053,116 @@ elif page == "🔍 詳細検索（スクリーナー）":
             st.warning("条件に該当する銘柄が見つかりませんでした。")
 
 # ----------------------------------------------------
-# 画面 3: ポートフォリオ＆売買管理
+# 画面 3: 🔥 上昇トレンド検知
+# ----------------------------------------------------
+elif page == "🔥 上昇トレンド検知":
+    st.title("🔥 上昇トレンド検知ダッシュボード")
+    st.markdown("設定したトレンド定義に基づいて、今勢いのある銘柄を自動で検知します。")
+
+    if companies_df.empty:
+        st.info("登録されている銘柄がありません。")
+    else:
+        trend_mode = st.selectbox(
+            "📐 検知の定義を選択",
+            [
+                "① 移動平均線（MA）の順序ベース（王道のトレンドフォロー）",
+                "② おすすめ総合定義：トレンド＆モメンタム型（MA順序 ＋ 出来高急増 ＋ 適度なRSI）"
+            ]
+        )
+
+        with st.expander("ℹ️ 選択中の定義の詳細を確認する"):
+            if "①" in trend_mode:
+                st.markdown("""
+                **【① 移動平均線（MA）の順序ベース】**
+                * **判定条件**: `現在値 ＞ 25日移動平均線` かつ `25日移動平均線 ＞ 75日移動平均線`
+                * **特徴**: 中期的な上向きトレンドがキレイに形成されている銘柄を堅実に捉える、王道の順張り定義です。
+                """)
+            else:
+                st.markdown("""
+                **【② おすすめ総合定義：トレンド＆モメンタム型】**
+                * **判定条件**: 
+                  1. `現在値 ＞ 25日移動平均線` かつ `25日移動平均線 ＞ 75日移動平均線`（中期トレンド）
+                  2. `直近の出来高 ＞ 過去20日平均出来高 × 1.2倍以上`（買いのエネルギーが急増）
+                  3. `RSI（14日） ≦ 70`（買われすぎて天井になっていない状態）
+                * **特徴**: トレンドの勢い（出来高）と過熱感（RSI）を同時にチェックし、ダマシを減らして実りのある銘柄をあぶり出します。
+                """)
+
+        # 判定用データフレームの構築
+        trend_df = companies_df.copy()
+
+        if "①" in trend_mode:
+            filtered_trend_df = trend_df[
+                (trend_df["latest_close"].notna()) &
+                (trend_df["latest_sma_25"].notna()) &
+                (trend_df["latest_sma_75"].notna()) &
+                (trend_df["latest_close"] > trend_df["latest_sma_25"]) &
+                (trend_df["latest_sma_25"] > trend_df["latest_sma_75"])
+            ]
+        else:
+            filtered_trend_df = trend_df[
+                (trend_df["latest_close"].notna()) &
+                (trend_df["latest_sma_25"].notna()) &
+                (trend_df["latest_sma_75"].notna()) &
+                (trend_df["latest_close"] > trend_df["latest_sma_25"]) &
+                (trend_df["latest_sma_25"] > trend_df["latest_sma_75"]) &
+                (trend_df["latest_volume"].notna()) &
+                (trend_df["latest_vol_sma_20"].notna()) &
+                (trend_df["latest_volume"] >= trend_df["latest_vol_sma_20"] * 1.2) &
+                (trend_df["latest_rsi"].notna()) &
+                (trend_df["latest_rsi"] <= 70.0)
+            ]
+
+        st.divider()
+        st.subheader(f"🚀 検知された上昇トレンド銘柄 ({len(filtered_trend_df)} 件)")
+
+        if not filtered_trend_df.empty:
+            cols = st.columns([1, 2.5, 1.2, 1, 1, 1.2, 1.2, 1.5])
+            cols[0].markdown("**コード**")
+            cols[1].markdown("**銘柄名**")
+            cols[2].markdown("**現在値**")
+            cols[3].markdown("**25日線**")
+            cols[4].markdown("**75日線**")
+            cols[5].markdown("**RSI(14)**")
+            cols[6].markdown("**出来高(対20日平均)**")
+            cols[7].markdown("**セクター**")
+            st.divider()
+
+            for idx, row in filtered_trend_df.iterrows():
+                cols = st.columns([1, 2.5, 1.2, 1, 1, 1.2, 1.2, 1.5])
+                cols[0].write(f"{row['code']}")
+
+                if cols[1].button(
+                    f"🔗 {row['name']}",
+                    key=f"btn_trend_{row['code']}",
+                    type="tertiary",
+                ):
+                    st.session_state["selected_stock_label"] = (
+                        f"{row['code']}: {row['name']}"
+                    )
+                    st.session_state["requested_page"] = (
+                        "📈 株価・テクニカル分析"
+                    )
+                    st.rerun()
+
+                cols[2].write(f"{row['latest_close']:,.1f}円" if pd.notna(row["latest_close"]) else "-")
+                cols[3].write(f"{row['latest_sma_25']:,.1f}" if pd.notna(row["latest_sma_25"]) else "-")
+                cols[4].write(f"{row['latest_sma_75']:,.1f}" if pd.notna(row["latest_sma_75"]) else "-")
+                cols[5].write(f"{row['latest_rsi']:.1f}" if pd.notna(row["latest_rsi"]) else "-")
+                
+                vol_ratio_str = "-"
+                if pd.notna(row["latest_volume"]) and pd.notna(row["latest_vol_sma_20"]) and row["latest_vol_sma_20"] > 0:
+                    ratio = row["latest_volume"] / row["latest_vol_sma_20"]
+                    vol_ratio_str = f"{ratio:.1f}倍 ({int(row['latest_volume']):,}株)"
+                elif pd.notna(row["latest_volume"]):
+                    vol_ratio_str = f"{int(row['latest_volume']):,}株"
+                cols[6].write(vol_ratio_str)
+                
+                cols[7].write(f"{row['sector']}" if pd.notna(row["sector"]) else "-")
+        else:
+            st.warning("現在の条件に完全に一致する上昇トレンド銘柄はありませんでした。")
+
+# ----------------------------------------------------
+# 画面 4: 💼 ポートフォリオ＆売買管理
 # ----------------------------------------------------
 elif page == "💼 ポートフォリオ＆売買管理":
     st.title("💼 ポートフォリオ＆売買履歴管理")
@@ -1174,7 +1293,7 @@ elif page == "💼 ポートフォリオ＆売買管理":
             st.info("まだ取引履歴はありません。")
 
 # ----------------------------------------------------
-# 画面 4: ⚙️ 銘柄登録・管理
+# 画面 5: ⚙️ 銘柄登録・管理
 # ----------------------------------------------------
 elif page == "⚙️ 銘柄登録・管理":
     st.title("⚙️ 銘柄登録・マスター管理")
