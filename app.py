@@ -1,11 +1,11 @@
-# app.py (PostgreSQL / Supabase 完全対応・修正済み版)
+# app.py (Supabase Pythonクライアント対応・完全版)
 import re
 import urllib.request
 from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
 import yfinance as yf
-from sqlalchemy import create_engine, text
+from supabase import create_client, Client
 
 # 1. 認証チェック用の関数
 def check_password():
@@ -67,30 +67,13 @@ SECTOR_MAP_JP = {
 }
 
 
-# データベース接続エンジン (Supabase / PostgreSQL)
-def get_engine():
-    db = st.secrets["postgres"]
-    port = db.get("port", 5432)
-    if not port:
-        port = 5432
-    # SSL通信（sslmode=require）を追加
-    url = f"postgresql://{db['user']}:{db['password']}@{db['host']}:{port}/{db['dbname']}?sslmode=require"
-    return create_engine(url)
+# Supabaseクライアントの初期化 (HTTPS通信を使用するため接続エラーを回避)
+def init_supabase() -> Client:
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
+    return create_client(url, key)
 
-# ★エラー対策：他の処理より先に engine を確実に生成します
-engine = get_engine()
-
-
-# DBスキーマの自動アップデート（PostgreSQL用）
-def init_db_schema():
-    with engine.begin() as conn:
-        for col_def in ["per DOUBLE PRECISION", "pbr DOUBLE PRECISION", "dividend_yield DOUBLE PRECISION", "roe DOUBLE PRECISION"]:
-            try:
-                conn.execute(text(f"ALTER TABLE companies ADD COLUMN IF NOT EXISTS {col_def};"))
-            except Exception:
-                pass
-
-init_db_schema()
+supabase = init_supabase()
 
 
 # Yahoo!ファイナンス(JP)から日本語銘柄名を自動取得
@@ -182,43 +165,69 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 
-# 銘柄一覧・全指標の取得（PostgreSQL用 STRING_AGG 対応）
+# 銘柄一覧・全指標の取得（Supabase API対応）
 @st.cache_data
 def load_companies():
-    query = """
-    SELECT c.ticker, c.code, c.name, c.sector, c.per, c.pbr, c.dividend_yield, c.roe,
-           latest_p.close AS latest_close,
-           latest_p.volume AS latest_volume,
-           latest_p.sma_25 AS latest_sma_25,
-           latest_p.sma_75 AS latest_sma_75,
-           latest_p.rsi_14 AS latest_rsi,
-           STRING_AGG(t.name, ', ') AS themes
-    FROM companies c
-    LEFT JOIN company_themes ct ON c.ticker = ct.ticker
-    LEFT JOIN themes t ON ct.theme_id = t.theme_id
-    LEFT JOIN (
-        SELECT dp1.ticker, dp1.close, dp1.volume, dp1.sma_25, dp1.sma_75, dp1.rsi_14, dp1.date
-        FROM daily_prices dp1
-        INNER JOIN (
-            SELECT ticker, MAX(date) AS max_date 
-            FROM daily_prices 
-            GROUP BY ticker
-        ) dp2 ON dp1.ticker = dp2.ticker AND dp1.date = dp2.max_date
-    ) latest_p ON c.ticker = latest_p.ticker
-    GROUP BY c.ticker, c.code, c.name, c.sector, c.per, c.pbr, c.dividend_yield, c.roe,
-             latest_p.close, latest_p.volume, latest_p.sma_25, latest_p.sma_75, latest_p.rsi_14, latest_p.date
-    ORDER BY c.code ASC;
-    """
-    df = pd.read_sql(query, engine)
-    return df
+    res_c = supabase.table("companies").select("*").execute()
+    df_c = pd.DataFrame(res_c.data)
+    if df_c.empty:
+        return pd.DataFrame()
+
+    # テーマ情報の結合
+    res_ct = supabase.table("company_themes").select("*").execute()
+    df_ct = pd.DataFrame(res_ct.data)
+
+    res_t = supabase.table("themes").select("*").execute()
+    df_t = pd.DataFrame(res_t.data)
+
+    if not df_ct.empty and not df_t.empty:
+        df_t_map = df_t.set_index("theme_id")["name"].to_dict()
+        df_ct["theme_name"] = df_ct["theme_id"].map(df_t_map)
+        themes_grouped = df_ct.groupby("ticker")["theme_name"].apply(
+            lambda x: ", ".join([str(v) for v in x if pd.notna(v)])
+        ).reset_index()
+        themes_grouped.rename(columns={"theme_name": "themes"}, inplace=True)
+        df_c = pd.merge(df_c, themes_grouped, on="ticker", how="left")
+    else:
+        df_c["themes"] = ""
+
+    # 株価最新データの取得と結合
+    res_dp = supabase.table("daily_prices").select("ticker, close, volume, sma_25, sma_75, rsi_14, date").execute()
+    df_dp = pd.DataFrame(res_dp.data)
+
+    if not df_dp.empty:
+        df_dp["date"] = pd.to_datetime(df_dp["date"])
+        idx = df_dp.groupby("ticker")["date"].idxmax()
+        latest_dp = df_dp.loc[idx].copy()
+        latest_dp.rename(columns={
+            "close": "latest_close",
+            "volume": "latest_volume",
+            "sma_25": "latest_sma_25",
+            "sma_75": "latest_sma_75",
+            "rsi_14": "latest_rsi"
+        }, inplace=True)
+        latest_dp.drop(columns=["date"], inplace=True, errors="ignore")
+        df_c = pd.merge(df_c, latest_dp, on="ticker", how="left")
+    else:
+        df_c["latest_close"] = None
+        df_c["latest_volume"] = None
+        df_c["latest_sma_25"] = None
+        df_c["latest_sma_75"] = None
+        df_c["latest_rsi"] = None
+
+    if "code" in df_c.columns:
+        df_c = df_c.sort_values(by="code", ascending=True)
+
+    return df_c
+
 
 # テーマ一覧の取得
 def load_themes():
-    df = pd.read_sql("SELECT theme_id, name FROM themes ORDER BY name ASC;", engine)
-    return df
+    res = supabase.table("themes").select("theme_id, name").order("name").execute()
+    return pd.DataFrame(res.data)
 
 
-# 単一銘柄の株価データをフェッチ＆DB保存（PostgreSQL ON CONFLICT 対応）
+# 単一銘柄の株価データをフェッチ＆DB保存（Upsert）
 def update_stock_prices_in_db(ticker, start_date, end_date=None):
     if end_date is None:
         end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -240,64 +249,53 @@ def update_stock_prices_in_db(ticker, start_date, end_date=None):
     df["sma_75"] = df["Close"].rolling(window=75).mean()
     df["rsi_14"] = calculate_rsi(df["Close"], 14)
 
-    with engine.begin() as conn:
-        for date, row in df.iterrows():
-            date_str = date.strftime("%Y-%m-%d")
+    records = []
+    for date, row in df.iterrows():
+        date_str = date.strftime("%Y-%m-%d")
 
-            def safe_val(val):
-                return None if pd.isna(val) else float(val)
+        def safe_val(val):
+            return None if pd.isna(val) else float(val)
 
-            conn.execute(
-                text("""
-                    INSERT INTO daily_prices (
-                        ticker, date, open, high, low, close, change_pct, volume, sma_25, sma_75, rsi_14
-                    ) VALUES (:ticker, :date, :open, :high, :low, :close, :change_pct, :volume, :sma_25, :sma_75, :rsi_14)
-                    ON CONFLICT (ticker, date) DO UPDATE SET 
-                        open = EXCLUDED.open,
-                        high = EXCLUDED.high,
-                        low = EXCLUDED.low,
-                        close = EXCLUDED.close,
-                        change_pct = EXCLUDED.change_pct,
-                        volume = EXCLUDED.volume,
-                        sma_25 = EXCLUDED.sma_25,
-                        sma_75 = EXCLUDED.sma_75,
-                        rsi_14 = EXCLUDED.rsi_14;
-                """),
-                {
-                    "ticker": ticker,
-                    "date": date_str,
-                    "open": safe_val(row.get("Open")),
-                    "high": safe_val(row.get("High")),
-                    "low": safe_val(row.get("Low")),
-                    "close": safe_val(row.get("Close")),
-                    "change_pct": safe_val(row.get("change_pct")),
-                    "volume": int(row["Volume"]) if ("Volume" in row and not pd.isna(row["Volume"])) else 0,
-                    "sma_25": safe_val(row.get("sma_25")),
-                    "sma_75": safe_val(row.get("sma_75")),
-                    "rsi_14": safe_val(row.get("rsi_14")),
-                },
-            )
+        records.append({
+            "ticker": ticker,
+            "date": date_str,
+            "open": safe_val(row.get("Open")),
+            "high": safe_val(row.get("High")),
+            "low": safe_val(row.get("Low")),
+            "close": safe_val(row.get("Close")),
+            "change_pct": safe_val(row.get("change_pct")),
+            "volume": int(row["Volume"]) if ("Volume" in row and not pd.isna(row["Volume"])) else 0,
+            "sma_25": safe_val(row.get("sma_25")),
+            "sma_75": safe_val(row.get("sma_75")),
+            "rsi_14": safe_val(row.get("rsi_14")),
+        })
+
+    try:
+        for i in range(0, len(records), 500):
+            batch = records[i:i+500]
+            supabase.table("daily_prices").upsert(batch, on_conflict="ticker,date").execute()
+    except Exception:
+        return False
+        
     return True
 
 
 # 全銘柄の株価および指標を一括更新
 def refresh_all_stocks_data():
-    tickers_df = pd.read_sql("SELECT ticker FROM companies;", engine)
-    tickers = tickers_df["ticker"].tolist()
-    if not tickers:
+    res = supabase.table("companies").select("ticker").execute()
+    tickers_df = pd.DataFrame(res.data)
+    if tickers_df.empty:
         return 0, "登録されている銘柄がありません。"
 
+    tickers = tickers_df["ticker"].tolist()
     success_count = 0
     end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
 
     for ticker in tickers:
-        last_date_df = pd.read_sql(
-            text("SELECT MAX(date) as max_date FROM daily_prices WHERE ticker = :ticker;"),
-            engine,
-            params={"ticker": ticker},
-        )
+        res_max = supabase.table("daily_prices").select("date").eq("ticker", ticker).order("date", desc=True).limit(1).execute()
+        max_date_data = res_max.data
+        max_date = max_date_data[0]["date"] if max_date_data else None
 
-        max_date = last_date_df["max_date"].iloc[0] if not last_date_df.empty else None
         if max_date:
             start_date = (
                 datetime.strptime(str(max_date), "%Y-%m-%d") - timedelta(days=120)
@@ -336,13 +334,12 @@ def refresh_all_stocks_data():
                     )
                 )
 
-                with engine.begin() as conn:
-                    conn.execute(
-                        text("""
-                            UPDATE companies SET per = :per, pbr = :pbr, dividend_yield = :div_yield, roe = :roe WHERE ticker = :ticker;
-                        """),
-                        {"per": per, "pbr": pbr, "div_yield": div_yield, "roe": roe, "ticker": ticker}
-                    )
+                supabase.table("companies").update({
+                    "per": per,
+                    "pbr": pbr,
+                    "dividend_yield": div_yield,
+                    "roe": roe
+                }).eq("ticker", ticker).execute()
             except Exception:
                 pass
             success_count += 1
@@ -360,11 +357,8 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
     ticker = f"{clean_code}.T" if not clean_code.endswith(".T") else clean_code
     code = clean_code.replace(".T", "")
 
-    existing_df = pd.read_sql(
-        text("SELECT name FROM companies WHERE ticker = :ticker OR code = :code;"),
-        engine,
-        params={"ticker": ticker, "code": code}
-    )
+    existing_res = supabase.table("companies").select("name").or_(f"ticker.eq.{ticker},code.eq.{code}").execute()
+    existing_df = pd.DataFrame(existing_res.data)
     if not existing_df.empty:
         return (
             False,
@@ -414,31 +408,18 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
     raw_roe = info.get("returnOnEquity")
     roe = raw_roe * 100 if raw_roe is not None else None
 
-    with engine.begin() as conn:
-        conn.execute(
-            text("""
-                INSERT INTO companies (ticker, code, name, sector, per, pbr, dividend_yield, roe)
-                VALUES (:ticker, :code, :name, :sector, :per, :pbr, :div_yield, :roe)
-                ON CONFLICT (ticker) DO UPDATE SET
-                    code = EXCLUDED.code,
-                    name = EXCLUDED.name,
-                    sector = EXCLUDED.sector,
-                    per = EXCLUDED.per,
-                    pbr = EXCLUDED.pbr,
-                    dividend_yield = EXCLUDED.dividend_yield,
-                    roe = EXCLUDED.roe;
-            """),
-            {
-                "ticker": ticker,
-                "code": code,
-                "name": name,
-                "sector": sector,
-                "per": per,
-                "pbr": pbr,
-                "div_yield": div_yield,
-                "roe": roe,
-            },
-        )
+    company_data = {
+        "ticker": ticker,
+        "code": code,
+        "name": name,
+        "sector": sector,
+        "per": per,
+        "pbr": pbr,
+        "dividend_yield": div_yield,
+        "roe": roe,
+    }
+    
+    supabase.table("companies").upsert(company_data, on_conflict="ticker").execute()
 
     end_date = datetime.today().strftime("%Y-%m-%d")
     start_date = (datetime.today() - timedelta(days=730)).strftime("%Y-%m-%d")
@@ -452,32 +433,32 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
 
 # ポートフォリオ計算ロジック
 def calculate_portfolio_and_summary():
-    tx_df = pd.read_sql(
-        text("""
-            SELECT t.transaction_id, t.ticker, c.code, c.name, t.type, t.trade_date, t.price, t.quantity, t.memo
-            FROM transactions t
-            JOIN companies c ON t.ticker = c.ticker
-            ORDER BY t.trade_date ASC, t.transaction_id ASC;
-        """),
-        engine,
-    )
-    latest_prices = pd.read_sql(
-        text("""
-            SELECT dp.ticker, dp.close
-            FROM daily_prices dp
-            INNER JOIN (
-                SELECT ticker, MAX(date) as max_date
-                FROM daily_prices
-                GROUP BY ticker
-            ) latest ON dp.ticker = latest.ticker AND dp.date = latest.max_date;
-        """),
-        engine,
-    )
+    res_tx = supabase.table("transactions").select("transaction_id, ticker, type, trade_date, price, quantity, memo").order("trade_date").order("transaction_id").execute()
+    tx_raw = res_tx.data
+    if not tx_raw:
+        return pd.DataFrame(), 0.0, 0.0, 0.0, pd.DataFrame()
 
-    if tx_df.empty:
-        return pd.DataFrame(), 0.0, 0.0, 0.0, tx_df
+    tx_df = pd.DataFrame(tx_raw)
+    
+    res_c = supabase.table("companies").select("ticker, code, name").execute()
+    c_df = pd.DataFrame(res_c.data)
+    
+    if not c_df.empty:
+        tx_df = pd.merge(tx_df, c_df, on="ticker", how="left")
+    else:
+        tx_df["code"] = ""
+        tx_df["name"] = ""
 
-    price_dict = dict(zip(latest_prices["ticker"], latest_prices["close"]))
+    res_dp = supabase.table("daily_prices").select("ticker, close, date").execute()
+    df_dp = pd.DataFrame(res_dp.data)
+    
+    price_dict = {}
+    if not df_dp.empty:
+        df_dp["date"] = pd.to_datetime(df_dp["date"])
+        idx = df_dp.groupby("ticker")["date"].idxmax()
+        latest_prices = df_dp.loc[idx]
+        price_dict = dict(zip(latest_prices["ticker"], latest_prices["close"]))
+
     portfolio = {}
 
     for _, row in tx_df.iterrows():
@@ -488,8 +469,8 @@ def calculate_portfolio_and_summary():
 
         if ticker not in portfolio:
             portfolio[ticker] = {
-                "code": row["code"],
-                "name": row["name"],
+                "code": row.get("code", ""),
+                "name": row.get("name", ticker),
                 "qty": 0,
                 "total_cost": 0.0,
                 "realized_pnl": 0.0,
@@ -620,7 +601,7 @@ if page == "📈 株価・テクニカル分析":
             "登録されている銘柄がありません。「⚙️ 銘柄登録・管理」メニューから銘柄を追加してください。"
         )
     else:
-        theme_list = ["全テーマ"] + themes_df["name"].tolist()
+        theme_list = ["全テーマ"] + themes_df["name"].tolist() if not themes_df.empty else ["全テーマ"]
         selected_theme_filter = st.sidebar.selectbox(
             "🏷️ テーマで絞り込み", theme_list
         )
@@ -656,20 +637,14 @@ if page == "📈 株価・テクニカル分析":
                 companies_df["ticker"] == selected_ticker
             ].iloc[0]
 
-            df_prices = pd.read_sql(
-                text("""
-                    SELECT date, open, high, low, close, change_pct, volume, sma_25, sma_75, rsi_14
-                    FROM daily_prices WHERE ticker = :ticker ORDER BY date ASC;
-                """),
-                engine,
-                params={"ticker": selected_ticker},
-            )
+            res_p = supabase.table("daily_prices").select("date, open, high, low, close, change_pct, volume, sma_25, sma_75, rsi_14").eq("ticker", selected_ticker).order("date").execute()
+            df_prices = pd.DataFrame(res_p.data)
 
             if not df_prices.empty:
                 latest = df_prices.iloc[-1]
                 themes_str = (
                     f" / テーマ: {company_info['themes']}"
-                    if pd.notna(company_info["themes"])
+                    if pd.notna(company_info["themes"]) and company_info["themes"] != ""
                     else ""
                 )
                 st.subheader(
@@ -888,7 +863,7 @@ elif page == "🔍 詳細検索（スクリーナー）":
 
         c9, c10 = st.columns([1, 3])
         use_theme = c9.checkbox("テーマ指定", value=False)
-        themes_list = themes_df["name"].tolist()
+        themes_list = themes_df["name"].tolist() if not themes_df.empty else []
         selected_theme = c10.selectbox(
             "テーマ",
             themes_list if themes_list else ["なし"],
@@ -949,7 +924,7 @@ elif page == "🔍 詳細検索（スクリーナー）":
 
         if use_sector and selected_sector:
             res_df = res_df[res_df["sector"] == selected_sector]
-        if use_theme and selected_theme:
+        if use_theme and selected_theme and selected_theme != "なし":
             res_df = res_df[
                 res_df["themes"].fillna("").str.contains(selected_theme)
             ]
@@ -1101,21 +1076,14 @@ elif page == "💼 ポートフォリオ＆売買管理":
 
                 if submit:
                     ticker = company_dict[selected_comp]
-                    with engine.begin() as conn:
-                        conn.execute(
-                            text("""
-                                INSERT INTO transactions (ticker, type, trade_date, price, quantity, memo)
-                                VALUES (:ticker, :type, :trade_date, :price, :quantity, :memo);
-                            """),
-                            {
-                                "ticker": ticker,
-                                "type": tx_type,
-                                "trade_date": str(trade_date),
-                                "price": price,
-                                "quantity": quantity,
-                                "memo": memo,
-                            },
-                        )
+                    supabase.table("transactions").insert({
+                        "ticker": ticker,
+                        "type": tx_type,
+                        "trade_date": str(trade_date),
+                        "price": price,
+                        "quantity": quantity,
+                        "memo": memo,
+                    }).execute()
                     st.success("✅ 取引ログを保存しました！")
                     st.rerun()
 
@@ -1155,11 +1123,7 @@ elif page == "💼 ポートフォリオ＆売買管理":
                 "削除したい取引の 取引ID を入力", min_value=1, step=1
             )
             if st.button("取引を削除する"):
-                with engine.begin() as conn:
-                    conn.execute(
-                        text("DELETE FROM transactions WHERE transaction_id = :del_id;"),
-                        {"del_id": del_id}
-                    )
+                supabase.table("transactions").delete().eq("transaction_id", del_id).execute()
                 st.success(f"ID: {del_id} の取引を削除しました。")
                 st.rerun()
         else:
@@ -1224,12 +1188,8 @@ elif page == "⚙️ 銘柄登録・管理":
                 companies_df["ticker"] == selected_edit_ticker
             ].iloc[0]
 
-            cur_themes_df = pd.read_sql(
-                text("SELECT theme_id FROM company_themes WHERE ticker = :ticker;"),
-                engine,
-                params={"ticker": selected_edit_ticker},
-            )
-            current_theme_ids = cur_themes_df["theme_id"].tolist()
+            cur_themes_res = supabase.table("company_themes").select("theme_id").eq("ticker", selected_edit_ticker).execute()
+            current_theme_ids = [item["theme_id"] for item in cur_themes_res.data]
 
             with st.form("edit_company_form"):
                 e_name = st.text_input("銘柄名", value=comp_data["name"])
@@ -1238,7 +1198,8 @@ elif page == "⚙️ 銘柄登録・管理":
                 theme_options = {
                     row["name"]: row["theme_id"]
                     for _, row in themes_df.iterrows()
-                }
+                } if not themes_df.empty else {}
+                
                 default_selected_themes = [
                     name
                     for name, t_id in theme_options.items()
@@ -1253,21 +1214,15 @@ elif page == "⚙️ 銘柄登録・管理":
                 update_btn = st.form_submit_button("💾 変更内容を保存")
 
                 if update_btn:
-                    with engine.begin() as conn:
-                        conn.execute(
-                            text("UPDATE companies SET name = :name, sector = :sector WHERE ticker = :ticker;"),
-                            {"name": e_name, "sector": e_sector, "ticker": selected_edit_ticker}
-                        )
-                        conn.execute(
-                            text("DELETE FROM company_themes WHERE ticker = :ticker;"),
-                            {"ticker": selected_edit_ticker}
-                        )
-                        for t_name in selected_theme_names:
-                            t_id = theme_options[t_name]
-                            conn.execute(
-                                text("INSERT INTO company_themes (ticker, theme_id) VALUES (:ticker, :theme_id);"),
-                                {"ticker": selected_edit_ticker, "theme_id": t_id}
-                            )
+                    supabase.table("companies").update({"name": e_name, "sector": e_sector}).eq("ticker", selected_edit_ticker).execute()
+                    supabase.table("company_themes").delete().eq("ticker", selected_edit_ticker).execute()
+                    
+                    new_mappings = []
+                    for t_name in selected_theme_names:
+                        t_id = theme_options[t_name]
+                        new_mappings.append({"ticker": selected_edit_ticker, "theme_id": t_id})
+                    if new_mappings:
+                        supabase.table("company_themes").insert(new_mappings).execute()
 
                     st.cache_data.clear()
                     st.success("✅ 保存完了しました！")
@@ -1287,11 +1242,10 @@ elif page == "⚙️ 銘柄登録・管理":
             if add_theme_btn:
                 if new_theme_name.strip():
                     try:
-                        with engine.begin() as conn:
-                            conn.execute(
-                                text("INSERT INTO themes (name, description) VALUES (:name, :description);"),
-                                {"name": new_theme_name.strip(), "description": theme_desc.strip()}
-                            )
+                        supabase.table("themes").insert({
+                            "name": new_theme_name.strip(),
+                            "description": theme_desc.strip()
+                        }).execute()
                         st.success(f"テーマ '{new_theme_name}' を追加しました！")
                         st.rerun()
                     except Exception:
@@ -1341,11 +1295,7 @@ elif page == "⚙️ 銘柄登録・管理":
             selected_del_ticker = del_company_options[selected_del_label]
 
             if st.button("❌ 選択した銘柄をDBから削除する"):
-                with engine.begin() as conn:
-                    conn.execute(
-                        text("DELETE FROM companies WHERE ticker = :ticker;"),
-                        {"ticker": selected_del_ticker}
-                    )
+                supabase.table("companies").delete().eq("ticker", selected_del_ticker).execute()
                 st.cache_data.clear()
                 st.success(f"銘柄（{selected_del_ticker}）を削除しました。")
                 st.rerun()
