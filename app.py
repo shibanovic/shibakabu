@@ -1,4 +1,4 @@
-# app.py (全機能完全版・スクリーナー最新データ取得対応)
+# app.py (株価取得・更新時にその日のPER/PBRもリアルタイム更新する完全版)
 import re
 import urllib.request
 from datetime import datetime, timedelta
@@ -227,7 +227,7 @@ def load_themes():
     return pd.DataFrame(res.data)
 
 
-# 単一銘柄の株価データをフェッチ＆DB保存（Upsert）
+# 単一銘柄の株価データをフェッチ＆DB保存（株価・テクニカルに加え、取得時の最新PER/PBRも今日付のdaily_pricesに反映）
 def update_stock_prices_in_db(ticker, start_date, end_date=None):
     if end_date is None:
         end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -275,6 +275,41 @@ def update_stock_prices_in_db(ticker, start_date, end_date=None):
             batch = records[i:i+500]
             supabase.table("daily_prices").upsert(batch, on_conflict="ticker,date").execute()
             
+        # 💡 【追加・変更点】株価データ更新のタイミングで、その瞬間の最新指標（実績PER優先）を取得し、今日付の daily_prices および companies をリアルタイム更新
+        today_str = datetime.today().strftime("%Y-%m-%d")
+        info = yf.Ticker(ticker).info
+        current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+        
+        per = info.get("trailingPE") or info.get("forwardPE")
+        pbr = info.get("priceToBook")
+        
+        dividend_rate = info.get("dividendRate")
+        if dividend_rate and current_price:
+            div_yield = (dividend_rate / current_price) * 100
+        else:
+            raw_div = info.get("dividendYield")
+            div_yield = (
+                (raw_div * 100 if raw_div and raw_div < 1.0 else raw_div)
+                if raw_div
+                else 0.0
+            )
+
+        raw_roe = info.get("returnOnEquity")
+        roe = raw_roe * 100 if raw_roe is not None else None
+
+        metrics_data = {
+            "per": per,
+            "pbr": pbr,
+            "dividend_yield": div_yield,
+            "roe": roe
+        }
+
+        # companies テーブルを最新化
+        supabase.table("companies").update(metrics_data).eq("ticker", ticker).execute()
+        
+        # daily_prices の今日付の行にも現在の指標をリアルタイム上書き反映
+        supabase.table("daily_prices").update(metrics_data).eq("ticker", ticker).eq("date", today_str).execute()
+            
     except Exception as e:
         st.error(f"株価取得・保存エラー ({ticker}): {e}")
         return False
@@ -282,7 +317,7 @@ def update_stock_prices_in_db(ticker, start_date, end_date=None):
     return True
 
 
-# 全銘柄の株価および指標を一括更新（実績PER優先、daily_pricesにも保存）
+# 全銘柄の株価および指標を一括更新
 def refresh_all_stocks_data():
     res = supabase.table("companies").select("ticker").execute()
     tickers_df = pd.DataFrame(res.data)
@@ -291,48 +326,13 @@ def refresh_all_stocks_data():
 
     tickers = tickers_df["ticker"].tolist()
     success_count = 0
-    today_str = datetime.today().strftime("%Y-%m-%d")
     end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
 
     for ticker in tickers:
         try:
             start_date = (datetime.today() - timedelta(days=30)).strftime("%Y-%m-%d")
+            # update_stock_prices_in_db 内で株価とともにその日の最新指標も自動的に更新されます
             update_stock_prices_in_db(ticker, start_date, end_date)
-
-            info = yf.Ticker(ticker).info
-            current_price = info.get("currentPrice") or info.get("regularMarketPrice")
-            
-            # 実績PER優先
-            per = info.get("trailingPE") or info.get("forwardPE")
-            pbr = info.get("priceToBook")
-            
-            dividend_rate = info.get("dividendRate")
-            if dividend_rate and current_price:
-                div_yield = (dividend_rate / current_price) * 100
-            else:
-                raw_div = info.get("dividendYield")
-                div_yield = (
-                    (raw_div * 100 if raw_div and raw_div < 1.0 else raw_div)
-                    if raw_div
-                    else 0.0
-                )
-
-            raw_roe = info.get("returnOnEquity")
-            roe = raw_roe * 100 if raw_roe is not None else None
-
-            metrics_data = {
-                "per": per,
-                "pbr": pbr,
-                "dividend_yield": div_yield,
-                "roe": roe
-            }
-
-            # companies テーブルを更新
-            supabase.table("companies").update(metrics_data).eq("ticker", ticker).execute()
-            
-            # daily_prices の「今日」の行にも指標を保存
-            supabase.table("daily_prices").update(metrics_data).eq("ticker", ticker).eq("date", today_str).execute()
-
             success_count += 1
         except Exception:
             pass
@@ -384,7 +384,6 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
     )
 
     current_price = info.get("currentPrice") or info.get("regularMarketPrice")
-    # 実績PER優先
     per = info.get("trailingPE") or info.get("forwardPE")
     pbr = info.get("priceToBook")
 
@@ -752,7 +751,7 @@ if page == "📈 株価・テクニカル分析":
                     )
 
 # ----------------------------------------------------
-# 画面 2: 🔍 詳細検索（スクリーナー） （最新DBデータを反映する修正版）
+# 画面 2: 🔍 詳細検索（スクリーナー）
 # ----------------------------------------------------
 elif page == "🔍 詳細検索（スクリーナー）":
     st.title("🔍 条件絞り込み検索（銘柄スクリーナー）")
@@ -763,7 +762,6 @@ elif page == "🔍 詳細検索（スクリーナー）":
     if companies_df.empty:
         st.info("登録銘柄がありません。まずは銘柄を追加してください。")
     else:
-        # スクリーナー表示時は常に最新の daily_prices から最新値（RSIや終値など）を取得して反映
         res_dp_latest = supabase.table("daily_prices").select("ticker, close, volume, sma_25, sma_75, rsi_14, date").order("date", desc=True).execute()
         df_dp_latest = pd.DataFrame(res_dp_latest.data)
         
