@@ -312,7 +312,7 @@ def refresh_all_stocks_data():
             try:
                 info = yf.Ticker(ticker).info
                 current_price = info.get("currentPrice") or info.get("regularMarketPrice")
-                per = info.get("forwardPE") or info.get("trailingPE")
+                per = info.get("trailingPE") or info.get("forwardPE")
                 pbr = info.get("priceToBook")
                 
                 dividend_rate = info.get("dividendRate")
