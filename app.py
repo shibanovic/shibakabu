@@ -1,4 +1,4 @@
-# app.py (オートコンプリート検索・休日対策を網羅した完全版)
+# app.py (型エラー対策・休日対応を網羅した完全版)
 import re
 import urllib.request
 from datetime import datetime, timedelta
@@ -215,6 +215,12 @@ def load_companies():
         df_c["latest_sma_75"] = None
         df_c["latest_rsi"] = None
 
+    # 💡 【重要】数値カラムを強制的に数値型（float/int）に変換し、型不整合エラーを防ぐ
+    numeric_cols = ["per", "pbr", "roe", "dividend_yield", "latest_close", "latest_volume", "latest_sma_25", "latest_sma_75", "latest_rsi"]
+    for col in numeric_cols:
+        if col in df_c.columns:
+            df_c[col] = pd.to_numeric(df_c[col], errors="coerce")
+
     if "code" in df_c.columns:
         df_c = df_c.sort_values(by="code", ascending=True)
 
@@ -275,7 +281,6 @@ def update_stock_prices_in_db(ticker, start_date, end_date=None):
             batch = records[i:i+500]
             supabase.table("daily_prices").upsert(batch, on_conflict="ticker,date").execute()
             
-        # 💡 【休日対策版】有効な指標データが取得できた時だけ上書き・更新する
         today_str = datetime.today().strftime("%Y-%m-%d")
         info = yf.Ticker(ticker).info
         current_price = info.get("currentPrice") or info.get("regularMarketPrice")
@@ -330,7 +335,7 @@ def refresh_all_stocks_data():
 
     for ticker in tickers:
         try:
-            start_date = (datetime.today() - timedelta(days=30)).strftime("%Y-%m-%d")
+            start_date = (datetime.today() - timedelta(days=730)).strftime("%Y-%m-%d")
             update_stock_prices_in_db(ticker, start_date, end_date)
             success_count += 1
         except Exception:
@@ -611,7 +616,6 @@ if page == "📈 株価・テクニカル分析":
                 f"テーマ '{selected_theme_filter}' に該当する銘柄はありません。"
             )
         else:
-            # 💡 【オートコンプリート風 絞り込み機能】
             st.sidebar.markdown("### 🔍 銘柄検索・選択")
             search_query = st.sidebar.text_input(
                 "コード・銘柄名・セクターで検索",
@@ -657,6 +661,11 @@ if page == "📈 株価・テクニカル分析":
             res_p = supabase.table("daily_prices").select("date, open, high, low, close, change_pct, volume, sma_25, sma_75, rsi_14").eq("ticker", selected_ticker).order("date").execute()
             df_prices = pd.DataFrame(res_p.data)
 
+            # 価格・テクニカル指標の数値キャスト
+            for col in ["close", "sma_25", "sma_75", "rsi_14", "change_pct", "volume"]:
+                if col in df_prices.columns:
+                    df_prices[col] = pd.to_numeric(df_prices[col], errors="coerce")
+
             if not df_prices.empty:
                 latest = df_prices.iloc[-1]
                 themes_str = (
@@ -671,7 +680,7 @@ if page == "📈 株価・テクニカル分析":
                 col1, col2, col3, col4, col5, col6 = st.columns(6)
                 delta_str = (
                     f"{latest['change_pct']:+.2f}%"
-                    if latest["change_pct"] is not None
+                    if pd.notna(latest["change_pct"])
                     else None
                 )
                 col1.metric(
@@ -799,6 +808,11 @@ elif page == "🔍 詳細検索（スクリーナー）":
                 on="ticker",
                 how="left"
             )
+
+        # 💡 【重要】スクリーニング用データフレームの数値カラムも確実に数値型へ変換
+        for col in ["per", "pbr", "roe", "dividend_yield", "latest_close", "latest_volume", "latest_sma_25", "latest_sma_75", "latest_rsi"]:
+            if col in res_df.columns:
+                res_df[col] = pd.to_numeric(res_df[col], errors="coerce")
 
         st.subheader("⚙️ 検索条件の設定")
 
