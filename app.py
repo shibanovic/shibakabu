@@ -238,43 +238,46 @@ def update_stock_prices_in_db(ticker, start_date, end_date=None):
         except Exception:
             end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
-    if df.empty:
-        return False
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    df["change_pct"] = df["Close"].pct_change() * 100
-    df["sma_25"] = df["Close"].rolling(window=25).mean()
-    df["sma_75"] = df["Close"].rolling(window=75).mean()
-    df["rsi_14"] = calculate_rsi(df["Close"], 14)
-
-    records = []
-    for date, row in df.iterrows():
-        date_str = date.strftime("%Y-%m-%d")
-
-        def safe_val(val):
-            return None if pd.isna(val) else float(val)
-
-        records.append({
-            "ticker": ticker,
-            "date": date_str,
-            "open": safe_val(row.get("Open")),
-            "high": safe_val(row.get("High")),
-            "low": safe_val(row.get("Low")),
-            "close": safe_val(row.get("Close")),
-            "change_pct": safe_val(row.get("change_pct")),
-            "volume": int(row["Volume"]) if ("Volume" in row and not pd.isna(row["Volume"])) else 0,
-            "sma_25": safe_val(row.get("sma_25")),
-            "sma_75": safe_val(row.get("sma_75")),
-            "rsi_14": safe_val(row.get("rsi_14")),
-        })
-
     try:
+        df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
+        if df.empty:
+            st.warning(f"⚠️ {ticker} の株価データが空でした。")
+            return False
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        df["change_pct"] = df["Close"].pct_change() * 100
+        df["sma_25"] = df["Close"].rolling(window=25).mean()
+        df["sma_75"] = df["Close"].rolling(window=75).mean()
+        df["rsi_14"] = calculate_rsi(df["Close"], 14)
+
+        records = []
+        for date, row in df.iterrows():
+            date_str = date.strftime("%Y-%m-%d")
+
+            def safe_val(val):
+                return None if pd.isna(val) else float(val)
+
+            records.append({
+                "ticker": ticker,
+                "date": date_str,
+                "open": safe_val(row.get("Open")),
+                "high": safe_val(row.get("High")),
+                "low": safe_val(row.get("Low")),
+                "close": safe_val(row.get("Close")),
+                "change_pct": safe_val(row.get("change_pct")),
+                "volume": int(row["Volume"]) if ("Volume" in row and not pd.isna(row["Volume"])) else 0,
+                "sma_25": safe_val(row.get("sma_25")),
+                "sma_75": safe_val(row.get("sma_75")),
+                "rsi_14": safe_val(row.get("rsi_14")),
+            })
+
         for i in range(0, len(records), 500):
             batch = records[i:i+500]
             supabase.table("daily_prices").upsert(batch, on_conflict="ticker,date").execute()
-    except Exception:
+            
+    except Exception as e:
+        st.error(f"株価取得・保存エラー ({ticker}): {e}")
         return False
         
     return True
