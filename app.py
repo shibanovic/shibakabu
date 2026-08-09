@@ -1,5 +1,6 @@
-# app.py (上昇トレンド検知と詳細画面の数値不一致を修正した完全版コード)
+# app.py (レートリミット対策ウェイト追加版)
 import re
+import time
 import urllib.request
 from datetime import datetime, timedelta
 import pandas as pd
@@ -336,7 +337,7 @@ def update_stock_prices_in_db(ticker, start_date, end_date=None):
     return True
 
 
-# 全銘柄の株価および指標を一括更新
+# 全銘柄の株価および指標を一括更新（レートリミット対策のウェイト追加）
 def refresh_all_stocks_data():
     res = supabase.table("companies").select("ticker").execute()
     tickers_df = pd.DataFrame(res.data)
@@ -352,6 +353,8 @@ def refresh_all_stocks_data():
             start_date = (datetime.today() - timedelta(days=730)).strftime("%Y-%m-%d")
             update_stock_prices_in_db(ticker, start_date, end_date)
             success_count += 1
+            # 連続リクエストによるレートリミット（429エラー）を防ぐため2秒待機
+            time.sleep(2)
         except Exception:
             pass
 
@@ -581,7 +584,7 @@ st.divider()
 st.sidebar.title("🐶 しばかぶ メニュー")
 
 if st.sidebar.button("🔄 全銘柄の株価・指標を更新"):
-    with st.spinner("最新データを取得中..."):
+    with st.spinner("最新データを取得中（レートリミット回避のため少し時間がかかります）..."):
         cnt, msg = refresh_all_stocks_data()
         st.sidebar.success(msg)
         st.rerun()
