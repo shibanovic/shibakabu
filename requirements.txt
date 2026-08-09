@@ -3,3 +3,4 @@ pandas
 yfinance
 SQLAlchemy
 psycopg2-binary
+supabase
