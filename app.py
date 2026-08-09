@@ -1,4 +1,4 @@
-# app.py (株価取得・更新時にその日のPER/PBRもリアルタイム更新する完全版)
+# app.py (オートコンプリート検索・休日対策を網羅した完全版)
 import re
 import urllib.request
 from datetime import datetime, timedelta
@@ -227,7 +227,7 @@ def load_themes():
     return pd.DataFrame(res.data)
 
 
-# 単一銘柄の株価データをフェッチ＆DB保存（株価・テクニカルに加え、取得時の最新PER/PBRも今日付のdaily_pricesに反映）
+# 単一銘柄の株価データをフェッチ＆DB保存（休日対策・リアルタイムPER/PBR更新対応）
 def update_stock_prices_in_db(ticker, start_date, end_date=None):
     if end_date is None:
         end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -275,7 +275,7 @@ def update_stock_prices_in_db(ticker, start_date, end_date=None):
             batch = records[i:i+500]
             supabase.table("daily_prices").upsert(batch, on_conflict="ticker,date").execute()
             
-        # 💡 【追加・変更点】株価データ更新のタイミングで、その瞬間の最新指標（実績PER優先）を取得し、今日付の daily_prices および companies をリアルタイム更新
+        # 💡 【休日対策版】有効な指標データが取得できた時だけ上書き・更新する
         today_str = datetime.today().strftime("%Y-%m-%d")
         info = yf.Ticker(ticker).info
         current_price = info.get("currentPrice") or info.get("regularMarketPrice")
@@ -291,24 +291,24 @@ def update_stock_prices_in_db(ticker, start_date, end_date=None):
             div_yield = (
                 (raw_div * 100 if raw_div and raw_div < 1.0 else raw_div)
                 if raw_div
-                else 0.0
+                else None
             )
 
         raw_roe = info.get("returnOnEquity")
         roe = raw_roe * 100 if raw_roe is not None else None
 
-        metrics_data = {
-            "per": per,
-            "pbr": pbr,
-            "dividend_yield": div_yield,
-            "roe": roe
-        }
+        metrics_data = {}
+        if per is not None: metrics_data["per"] = per
+        if pbr is not None: metrics_data["pbr"] = pbr
+        if div_yield is not None: metrics_data["dividend_yield"] = div_yield
+        if roe is not None: metrics_data["roe"] = roe
 
-        # companies テーブルを最新化
-        supabase.table("companies").update(metrics_data).eq("ticker", ticker).execute()
-        
-        # daily_prices の今日付の行にも現在の指標をリアルタイム上書き反映
-        supabase.table("daily_prices").update(metrics_data).eq("ticker", ticker).eq("date", today_str).execute()
+        if metrics_data:
+            supabase.table("companies").update(metrics_data).eq("ticker", ticker).execute()
+            
+            res_check = supabase.table("daily_prices").select("ticker").eq("ticker", ticker).eq("date", today_str).execute()
+            if res_check.data:
+                supabase.table("daily_prices").update(metrics_data).eq("ticker", ticker).eq("date", today_str).execute()
             
     except Exception as e:
         st.error(f"株価取得・保存エラー ({ticker}): {e}")
@@ -331,7 +331,6 @@ def refresh_all_stocks_data():
     for ticker in tickers:
         try:
             start_date = (datetime.today() - timedelta(days=30)).strftime("%Y-%m-%d")
-            # update_stock_prices_in_db 内で株価とともにその日の最新指標も自動的に更新されます
             update_stock_prices_in_db(ticker, start_date, end_date)
             success_count += 1
         except Exception:
@@ -612,9 +611,34 @@ if page == "📈 株価・テクニカル分析":
                 f"テーマ '{selected_theme_filter}' に該当する銘柄はありません。"
             )
         else:
+            # 💡 【オートコンプリート風 絞り込み機能】
+            st.sidebar.markdown("### 🔍 銘柄検索・選択")
+            search_query = st.sidebar.text_input(
+                "コード・銘柄名・セクターで検索",
+                value="",
+                placeholder="例: 7203, トヨタ, 半導体 など",
+                help="日本語、英語、数字のどれでも部分一致で絞り込めます"
+            )
+
+            if search_query.strip():
+                query_lower = search_query.strip().lower()
+                mask = (
+                    filtered_companies["code"].astype(str).str.lower().str.contains(query_lower) |
+                    filtered_companies["name"].astype(str).str.lower().str.contains(query_lower) |
+                    filtered_companies["sector"].astype(str).str.lower().str.contains(query_lower) |
+                    filtered_companies["themes"].astype(str).str.lower().str.contains(query_lower)
+                )
+                searched_companies = filtered_companies[mask]
+            else:
+                searched_companies = filtered_companies
+
+            if searched_companies.empty:
+                st.sidebar.warning("一致する銘柄が見つかりませんでした。")
+                st.stop()
+
             company_options = {
                 f"{row['code']}: {row['name']}": row["ticker"]
-                for _, row in filtered_companies.iterrows()
+                for _, row in searched_companies.iterrows()
             }
             option_keys = list(company_options.keys())
 
@@ -622,7 +646,7 @@ if page == "📈 株価・テクニカル分析":
                 st.session_state["selected_stock_label"] = option_keys[0]
 
             selected_label = st.sidebar.selectbox(
-                "銘柄を選んでください", option_keys, key="selected_stock_label"
+                "絞り込み結果から選択", option_keys, key="selected_stock_label"
             )
             selected_ticker = company_options[selected_label]
 
