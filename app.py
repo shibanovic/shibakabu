@@ -1,4 +1,4 @@
-# app.py (上昇トレンド検知をタブ化・最適化した完全版コード)
+# app.py (上昇トレンド検知と詳細画面の数値不一致を修正した完全版コード)
 import re
 import urllib.request
 from datetime import datetime, timedelta
@@ -165,8 +165,8 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 
-# 銘柄一覧・全指標の取得（Supabase API対応）
-@st.cache_data
+# 銘柄一覧・全指標の取得（Supabase API対応・最新日取得ロジック修正版）
+@st.cache_data(ttl=60)
 def load_companies():
     res_c = supabase.table("companies").select("*").execute()
     df_c = pd.DataFrame(res_c.data)
@@ -197,13 +197,16 @@ def load_companies():
 
     if not df_dp.empty:
         df_dp["date"] = pd.to_datetime(df_dp["date"])
+        # 確実に日付順にソート
         df_dp = df_dp.sort_values(["ticker", "date"])
+        
         df_dp["vol_sma_20"] = df_dp.groupby("ticker")["volume"].transform(
             lambda x: x.rolling(window=20, min_periods=1).mean()
         )
 
-        idx = df_dp.groupby("ticker")["date"].idxmax()
-        latest_dp = df_dp.loc[idx].copy()
+        # 最新日の行を確実に抽出（重複排除で最後の行＝最新日を取得）
+        latest_dp = df_dp.drop_duplicates(subset=["ticker"], keep="last").copy()
+        
         latest_dp.rename(columns={
             "close": "latest_close",
             "volume": "latest_volume",
