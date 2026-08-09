@@ -1,4 +1,4 @@
-# app.py (Supabase Pythonクライアント対応・完全版)
+# app.py (全機能完全版・スクリーナー最新データ取得対応)
 import re
 import urllib.request
 from datetime import datetime, timedelta
@@ -67,7 +67,7 @@ SECTOR_MAP_JP = {
 }
 
 
-# Supabaseクライアントの初期化 (HTTPS通信を使用するため接続エラーを回避)
+# Supabaseクライアントの初期化
 def init_supabase() -> Client:
     url = st.secrets["supabase"]["url"]
     key = st.secrets["supabase"]["key"]
@@ -241,7 +241,6 @@ def update_stock_prices_in_db(ticker, start_date, end_date=None):
     try:
         df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
         if df.empty:
-            st.warning(f"⚠️ {ticker} の株価データが空でした。")
             return False
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
@@ -283,7 +282,7 @@ def update_stock_prices_in_db(ticker, start_date, end_date=None):
     return True
 
 
-# 全銘柄の株価および指標を一括更新
+# 全銘柄の株価および指標を一括更新（実績PER優先、daily_pricesにも保存）
 def refresh_all_stocks_data():
     res = supabase.table("companies").select("ticker").execute()
     tickers_df = pd.DataFrame(res.data)
@@ -292,60 +291,51 @@ def refresh_all_stocks_data():
 
     tickers = tickers_df["ticker"].tolist()
     success_count = 0
+    today_str = datetime.today().strftime("%Y-%m-%d")
     end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
 
     for ticker in tickers:
-        res_max = supabase.table("daily_prices").select("date").eq("ticker", ticker).order("date", desc=True).limit(1).execute()
-        max_date_data = res_max.data
-        max_date = max_date_data[0]["date"] if max_date_data else None
+        try:
+            start_date = (datetime.today() - timedelta(days=30)).strftime("%Y-%m-%d")
+            update_stock_prices_in_db(ticker, start_date, end_date)
 
-        if max_date:
-            start_date = (
-                datetime.strptime(str(max_date), "%Y-%m-%d") - timedelta(days=120)
-            ).strftime("%Y-%m-%d")
-        else:
-            start_date = (datetime.today() - timedelta(days=730)).strftime(
-                "%Y-%m-%d"
-            )
-
-        if update_stock_prices_in_db(ticker, start_date, end_date):
-            try:
-                info = yf.Ticker(ticker).info
-                current_price = info.get("currentPrice") or info.get("regularMarketPrice")
-                per = info.get("trailingPE") or info.get("forwardPE")
-                pbr = info.get("priceToBook")
-                
-                dividend_rate = info.get("dividendRate")
-                if dividend_rate and current_price:
-                    div_yield = (dividend_rate / current_price) * 100
-                else:
-                    raw_div = info.get("dividendYield")
-                    div_yield = (
-                        (raw_div * 100 if raw_div and raw_div < 1.0 else raw_div)
-                        if raw_div
-                        else 0.0
-                    )
-
-                raw_roe = info.get("returnOnEquity")
-                roe = (
-                    raw_roe * 100
-                    if raw_roe is not None
-                    else (
-                        info.get("roe") * 100
-                        if info.get("roe") is not None
-                        else None
-                    )
+            info = yf.Ticker(ticker).info
+            current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+            
+            # 実績PER優先
+            per = info.get("trailingPE") or info.get("forwardPE")
+            pbr = info.get("priceToBook")
+            
+            dividend_rate = info.get("dividendRate")
+            if dividend_rate and current_price:
+                div_yield = (dividend_rate / current_price) * 100
+            else:
+                raw_div = info.get("dividendYield")
+                div_yield = (
+                    (raw_div * 100 if raw_div and raw_div < 1.0 else raw_div)
+                    if raw_div
+                    else 0.0
                 )
 
-                supabase.table("companies").update({
-                    "per": per,
-                    "pbr": pbr,
-                    "dividend_yield": div_yield,
-                    "roe": roe
-                }).eq("ticker", ticker).execute()
-            except Exception:
-                pass
+            raw_roe = info.get("returnOnEquity")
+            roe = raw_roe * 100 if raw_roe is not None else None
+
+            metrics_data = {
+                "per": per,
+                "pbr": pbr,
+                "dividend_yield": div_yield,
+                "roe": roe
+            }
+
+            # companies テーブルを更新
+            supabase.table("companies").update(metrics_data).eq("ticker", ticker).execute()
+            
+            # daily_prices の「今日」の行にも指標を保存
+            supabase.table("daily_prices").update(metrics_data).eq("ticker", ticker).eq("date", today_str).execute()
+
             success_count += 1
+        except Exception:
+            pass
 
     st.cache_data.clear()
     return (
@@ -394,7 +384,8 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
     )
 
     current_price = info.get("currentPrice") or info.get("regularMarketPrice")
-    per = info.get("forwardPE") or info.get("trailingPE")
+    # 実績PER優先
+    per = info.get("trailingPE") or info.get("forwardPE")
     pbr = info.get("priceToBook")
 
     dividend_rate = info.get("dividendRate")
@@ -674,7 +665,7 @@ if page == "📈 株価・テクニカル分析":
                     if pd.notna(company_info["per"])
                     else "-"
                 )
-                col3.metric("PER (予想)", per_disp)
+                col3.metric("PER (実績)", per_disp)
                 pbr_disp = (
                     f"{company_info['pbr']:.2f} 倍"
                     if pd.notna(company_info["pbr"])
@@ -761,7 +752,7 @@ if page == "📈 株価・テクニカル分析":
                     )
 
 # ----------------------------------------------------
-# 画面 2: 🔍 詳細検索（スクリーナー）
+# 画面 2: 🔍 詳細検索（スクリーナー） （最新DBデータを反映する修正版）
 # ----------------------------------------------------
 elif page == "🔍 詳細検索（スクリーナー）":
     st.title("🔍 条件絞り込み検索（銘柄スクリーナー）")
@@ -772,6 +763,21 @@ elif page == "🔍 詳細検索（スクリーナー）":
     if companies_df.empty:
         st.info("登録銘柄がありません。まずは銘柄を追加してください。")
     else:
+        # スクリーナー表示時は常に最新の daily_prices から最新値（RSIや終値など）を取得して反映
+        res_dp_latest = supabase.table("daily_prices").select("ticker, close, volume, sma_25, sma_75, rsi_14, date").order("date", desc=True).execute()
+        df_dp_latest = pd.DataFrame(res_dp_latest.data)
+        
+        res_df = companies_df.copy()
+        if not df_dp_latest.empty:
+            df_dp_latest["date"] = pd.to_datetime(df_dp_latest["date"])
+            latest_dp = df_dp_latest.loc[df_dp_latest.groupby("ticker")["date"].idxmax()].copy()
+            res_df = pd.merge(
+                res_df.drop(columns=["latest_close", "latest_volume", "latest_sma_25", "latest_sma_75", "latest_rsi"], errors="ignore"),
+                latest_dp.rename(columns={"close": "latest_close", "volume": "latest_volume", "sma_25": "latest_sma_25", "sma_75": "latest_sma_75", "rsi_14": "latest_rsi"}),
+                on="ticker",
+                how="left"
+            )
+
         st.subheader("⚙️ 検索条件の設定")
 
         c1, c2, c3, c4 = st.columns(4)
@@ -853,7 +859,7 @@ elif page == "🔍 詳細検索（スクリーナー）":
         sectors = sorted(
             [
                 s
-                for s in companies_df["sector"].dropna().unique()
+                for s in res_df["sector"].dropna().unique()
                 if s != "未分類"
             ]
         )
@@ -874,7 +880,6 @@ elif page == "🔍 詳細検索（スクリーナー）":
             label_visibility="collapsed",
         )
 
-        res_df = companies_df.copy()
         if use_per and per_max > 0:
             res_df = res_df[
                 (res_df["per"].notna()) & (res_df["per"] <= per_max)
