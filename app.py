@@ -1,4 +1,4 @@
-# app.py (最新日判定およびデータ結合ロジック修正版)
+# app.py (キャッシュ考慮・完全修正版)
 import re
 import time
 import urllib.request
@@ -166,7 +166,7 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 
-# 銘柄一覧・全指標の取得（Supabase API対応・日付判定修正版）
+# 銘柄一覧・全指標の取得（Supabase API対応・厳密な日付順最新抽出版）
 @st.cache_data(ttl=60)
 def load_companies():
     res_c = supabase.table("companies").select("*").execute()
@@ -197,7 +197,7 @@ def load_companies():
     df_dp = pd.DataFrame(res_dp.data)
 
     if not df_dp.empty:
-        # 確実に日時型に変換してから並び替え
+        # 日付型に確実に変換し、確実に最新日を抽出するためのソート
         df_dp["date"] = pd.to_datetime(df_dp["date"])
         df_dp = df_dp.sort_values(["ticker", "date"])
         
@@ -205,7 +205,7 @@ def load_companies():
             lambda x: x.rolling(window=20, min_periods=1).mean()
         )
 
-        # 確実に各銘柄の最新日付の行を抽出
+        # 確実に各銘柄の最大日付の行を抽出する
         latest_dp = df_dp.loc[df_dp.groupby("ticker")["date"].idxmax()].copy()
         
         latest_dp.rename(columns={
@@ -218,7 +218,7 @@ def load_companies():
         }, inplace=True)
         latest_dp.drop(columns=["date"], inplace=True, errors="ignore")
 
-        # 既存のdf_cから古いlatest列が存在していれば排除してから結合
+        # 既存のdf_cから古いlatest列が存在していればすべて排除してから結合
         df_c = df_c.drop(columns=["latest_close", "latest_volume", "latest_vol_sma_20", "latest_sma_25", "latest_sma_75", "latest_rsi"], errors="ignore")
         df_c = pd.merge(df_c, latest_dp, on="ticker", how="left")
     else:
@@ -242,18 +242,6 @@ def load_companies():
         df_c = df_c.sort_values(by="code", ascending=True)
 
     return df_c
-
-
-# キャッシュをクリアしてDBから直接再読み込みする関数
-def load_companies_fresh():
-    st.cache_data.clear()
-    return load_companies()
-
-
-# テーマ一覧の取得
-def load_themes():
-    res = supabase.table("themes").select("theme_id, name").order("name").execute()
-    return pd.DataFrame(res.data)
 
 
 # 単一銘柄の株価データをフェッチ＆DB保存（差分更新対応）
@@ -638,6 +626,11 @@ st.divider()
 # ----------------------------------------------------
 st.sidebar.title("🐶 しばかぶ メニュー")
 
+if st.sidebar.button("🔄 キャッシュクリア＆全データ再読込"):
+    st.cache_data.clear()
+    st.sidebar.success("キャッシュをクリアしました！")
+    st.rerun()
+
 if st.sidebar.button("🔄 全銘柄の株価・指標を更新"):
     with st.spinner("古い順に50件ずつ差分データを更新中（レートリミット回避のため少し時間がかかります）..."):
         succ_cnt, tot_cnt, msg, failed_list = refresh_all_stocks_data_smart()
@@ -659,12 +652,9 @@ page = st.sidebar.radio(
 )
 st.session_state["current_page"] = page
 
-# 上昇トレンド検知画面の場合はキャッシュをクリアしてDBから直接読み込み
-if page == "🔥 上昇トレンド検知":
-    companies_df = load_companies_fresh()
-else:
-    companies_df = load_companies()
-
+# ページ切り替えのタイミングで確実に最新データをロード（キャッシュクリアも連動）
+st.cache_data.clear()
+companies_df = load_companies()
 themes_df = load_themes()
 
 # ----------------------------------------------------
