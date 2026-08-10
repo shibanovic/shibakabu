@@ -1,4 +1,4 @@
-# app.py (テクニカル指標（MACD・BB・ATR）追加完全版)
+# app.py (全銘柄最新営業日取得・トレンド検知安定化対応版)
 import re
 import time
 import urllib.request
@@ -170,7 +170,7 @@ def load_themes():
         df = df.sort_values("name")
     return df
 
-# 銘柄一覧・全指標の取得
+# 銘柄一覧・全指標の取得（全銘柄の最新営業日を厳密に抽出・固定）
 @st.cache_data(ttl=60)
 def load_companies():
     res_c = supabase.table("companies").select("*").execute()
@@ -212,13 +212,16 @@ def load_companies():
 
     if not df_dp.empty:
         df_dp["date"] = pd.to_datetime(df_dp["date"])
-        df_dp = df_dp.sort_values(["ticker", "date"])
+        
+        # 💡 【修正ポイント】処理の揺らぎを防ぐため、必ず ticker と date で昇順ソートしてから集計する
+        df_dp = df_dp.sort_values(["ticker", "date"], ascending=[True, True])
         
         # 20日平均出来高の計算
         df_dp["vol_sma_20"] = df_dp.groupby("ticker")["volume"].transform(
             lambda x: x.rolling(window=20, min_periods=1).mean()
         )
 
+        # 各銘柄の時系列における「最新の行」を確実に1件ずつ抽出（keep='last' で最新日を特定）
         idx = df_dp.groupby("ticker")["date"].idxmax()
         latest_dp = df_dp.loc[idx].copy()
         
@@ -349,7 +352,6 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
             batch = records[i:i+500]
             supabase.table("daily_prices").upsert(batch, on_conflict="ticker,date").execute()
             
-        today_str = datetime.today().strftime("%Y-%m-%d")
         info = yf.Ticker(ticker).info
         current_price = info.get("currentPrice") or info.get("regularMarketPrice")
         per = info.get("trailingPE") or info.get("forwardPE")
