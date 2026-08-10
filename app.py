@@ -1,4 +1,4 @@
-# app.py (リンク遷移・フィルター競合完全解決版)
+# app.py (テクニカル指標（MACD・BB・ATR）追加完全版)
 import re
 import time
 import urllib.request
@@ -170,7 +170,7 @@ def load_themes():
         df = df.sort_values("name")
     return df
 
-# 銘柄一覧・全指標の取得（Supabaseの1,000行制限を回避して全件取得する修正版）
+# 銘柄一覧・全指標の取得
 @st.cache_data(ttl=60)
 def load_companies():
     res_c = supabase.table("companies").select("*").execute()
@@ -195,7 +195,7 @@ def load_companies():
     else:
         df_c["themes"] = ""
 
-    # --- Supabaseの1,000行制限を回避してdaily_pricesを全件ループ取得 ---
+    # Supabaseの1,000行制限を回避してdaily_pricesを全件ループ取得
     df_dp_list = []
     chunk_size = 1000
     offset = 0
@@ -219,7 +219,6 @@ def load_companies():
             lambda x: x.rolling(window=20, min_periods=1).mean()
         )
 
-        # 各銘柄の「真の最新日」の行インデックスを確実に取得
         idx = df_dp.groupby("ticker")["date"].idxmax()
         latest_dp = df_dp.loc[idx].copy()
         
@@ -257,7 +256,7 @@ def load_companies():
 
     return df_c
 
-# 単一銘柄の株価データをフェッチ＆DB保存
+# 単一銘柄の株価データフェッチ＆テクニカル指標計算・DB保存
 def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
     if end_date is None:
         end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -281,7 +280,8 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
             start_date = (datetime.today() - timedelta(days=730)).strftime("%Y-%m-%d")
 
     try:
-        calc_start_dt = datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=120)
+        # インジケーター計算のために余裕を持って少し前（150日前）からデータを取得
+        calc_start_dt = datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=150)
         fetch_start_date = calc_start_dt.strftime("%Y-%m-%d")
 
         df = yf.download(ticker, start=fetch_start_date, end=end_date, progress=False, auto_adjust=False)
@@ -290,10 +290,31 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
+        # --- 各種テクニカル指標の計算 ---
         df["change_pct"] = df["Close"].pct_change() * 100
         df["sma_25"] = df["Close"].rolling(window=25).mean()
         df["sma_75"] = df["Close"].rolling(window=75).mean()
         df["rsi_14"] = calculate_rsi(df["Close"], 14)
+
+        # MACD (12, 26, 9)
+        exp12 = df["Close"].ewm(span=12, adjust=False).mean()
+        exp26 = df["Close"].ewm(span=26, adjust=False).mean()
+        df["macd"] = exp12 - exp26
+        df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+
+        # ボリンジャーバンド (20日, 2σ)
+        bb_sma = df["Close"].rolling(window=20).mean()
+        bb_std = df["Close"].rolling(window=20).std()
+        df["bb_upper"] = bb_sma + (bb_std * 2)
+        df["bb_lower"] = bb_sma - (bb_std * 2)
+
+        # ATR (14日)
+        high_low = df["High"] - df["Low"]
+        high_close = (df["High"] - df["Close"].shift()).abs()
+        low_close = (df["Low"] - df["Close"].shift()).abs()
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df["atr_14"] = true_range.rolling(window=14).mean()
+        # ---------------------------
 
         df_to_save = df.loc[start_date:]
         if df_to_save.empty:
@@ -317,6 +338,11 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
                 "sma_25": safe_val(row.get("sma_25")),
                 "sma_75": safe_val(row.get("sma_75")),
                 "rsi_14": safe_val(row.get("rsi_14")),
+                "macd": safe_val(row.get("macd")),
+                "macd_signal": safe_val(row.get("macd_signal")),
+                "bb_upper": safe_val(row.get("bb_upper")),
+                "bb_lower": safe_val(row.get("bb_lower")),
+                "atr_14": safe_val(row.get("atr_14")),
             })
 
         for i in range(0, len(records), 500):
@@ -643,13 +669,11 @@ if st.sidebar.button("🔄 全銘柄の株価・指標を更新"):
             st.sidebar.warning(f"⚠️ 以下の {len(failed_list)} 件の更新に失敗しました:\n" + ", ".join(failed_list))
         st.rerun()
 
-# 現在のページがリストの何番目か取得
 try:
     default_idx = pages_list.index(st.session_state["current_page"])
 except ValueError:
     default_idx = 0
 
-# サイドバーのラジオボタン（状態競合を防ぐため独立したキーにする）
 selected_menu = st.sidebar.radio(
     "機能を選択:",
     pages_list,
@@ -657,14 +681,12 @@ selected_menu = st.sidebar.radio(
     key="nav_radio_widget",
 )
 
-# ラジオボタンで選ばれたらセッションステートを更新
 if selected_menu != st.session_state["current_page"]:
     st.session_state["current_page"] = selected_menu
     st.rerun()
 
 page = st.session_state["current_page"]
 
-# データをロード
 companies_df = load_companies()
 themes_df = load_themes()
 
@@ -687,7 +709,6 @@ if page == "📈 株価・テクニカル分析":
         filtered_companies = companies_df.copy()
         selected_label_state = st.session_state.get("selected_stock_label")
 
-        # 🏷️ テーマフィルター適用（リンクからの遷移銘柄が除外されないようにする）
         if selected_theme_filter != "全テーマ":
             if selected_label_state:
                 selected_row = companies_df[companies_df.apply(lambda r: f"{r['code']}: {r['name']}" == selected_label_state, axis=1)]
@@ -736,7 +757,6 @@ if page == "📈 株価・テクニカル分析":
             else:
                 searched_companies = filtered_companies
 
-            # 🛠️【完全修正】検索結果やフィルターで消えないように、選択中銘柄を最優先で候補リストに必ず含める
             if selected_label_state:
                 selected_row_all = companies_df[companies_df.apply(lambda r: f"{r['code']}: {r['name']}" == selected_label_state, axis=1)]
                 if not selected_row_all.empty and selected_row_all.iloc[0]["ticker"] not in searched_companies["ticker"].values:
