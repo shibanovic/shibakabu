@@ -1,4 +1,4 @@
-# app.py (ページ遷移の競合完全修復版 ＋ データの結合・最新値取得修正版)
+# app.py (ページ遷移の競合完全修復版 ＋ データの結合・最新値取得修正版 ＋ 1,000行制限回避版)
 import re
 import time
 import urllib.request
@@ -170,7 +170,7 @@ def load_themes():
         df = df.sort_values("name")
     return df
 
-# 銘柄一覧・全指標の取得（安全な最新値結合ロジックに修正）
+# 銘柄一覧・全指標の取得（Supabaseの1,000行制限を回避して全件取得する修正版）
 @st.cache_data(ttl=60)
 def load_companies():
     res_c = supabase.table("companies").select("*").execute()
@@ -195,8 +195,20 @@ def load_companies():
     else:
         df_c["themes"] = ""
 
-    res_dp = supabase.table("daily_prices").select("ticker, close, volume, sma_25, sma_75, rsi_14, date").execute()
-    df_dp = pd.DataFrame(res_dp.data)
+    # --- 【重要】Supabaseの1,000行制限を回避してdaily_pricesを全件ループ取得 ---
+    df_dp_list = []
+    chunk_size = 1000
+    offset = 0
+    while True:
+        res_dp = supabase.table("daily_prices").select("ticker, close, volume, sma_25, sma_75, rsi_14, date").range(offset, offset + chunk_size - 1).execute()
+        if not res_dp.data:
+            break
+        df_dp_list.extend(res_dp.data)
+        if len(res_dp.data) < chunk_size:
+            break
+        offset += chunk_size
+    
+    df_dp = pd.DataFrame(df_dp_list)
 
     if not df_dp.empty:
         df_dp["date"] = pd.to_datetime(df_dp["date"])
