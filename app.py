@@ -1,4 +1,4 @@
-# app.py (キャッシュ考慮・完全修正版)
+# app.py (load_themes追加・完全修正版)
 import re
 import time
 import urllib.request
@@ -166,6 +166,16 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 
+# テーマ一覧の取得
+@st.cache_data(ttl=60)
+def load_themes():
+    res = supabase.table("themes").select("*").execute()
+    df = pd.DataFrame(res.data)
+    if not df.empty and "name" in df.columns:
+        df = df.sort_values("name")
+    return df
+
+
 # 銘柄一覧・全指標の取得（Supabase API対応・厳密な日付順最新抽出版）
 @st.cache_data(ttl=60)
 def load_companies():
@@ -197,7 +207,6 @@ def load_companies():
     df_dp = pd.DataFrame(res_dp.data)
 
     if not df_dp.empty:
-        # 日付型に確実に変換し、確実に最新日を抽出するためのソート
         df_dp["date"] = pd.to_datetime(df_dp["date"])
         df_dp = df_dp.sort_values(["ticker", "date"])
         
@@ -205,7 +214,6 @@ def load_companies():
             lambda x: x.rolling(window=20, min_periods=1).mean()
         )
 
-        # 確実に各銘柄の最大日付の行を抽出する
         latest_dp = df_dp.loc[df_dp.groupby("ticker")["date"].idxmax()].copy()
         
         latest_dp.rename(columns={
@@ -218,7 +226,6 @@ def load_companies():
         }, inplace=True)
         latest_dp.drop(columns=["date"], inplace=True, errors="ignore")
 
-        # 既存のdf_cから古いlatest列が存在していればすべて排除してから結合
         df_c = df_c.drop(columns=["latest_close", "latest_volume", "latest_vol_sma_20", "latest_sma_25", "latest_sma_75", "latest_rsi"], errors="ignore")
         df_c = pd.merge(df_c, latest_dp, on="ticker", how="left")
     else:
