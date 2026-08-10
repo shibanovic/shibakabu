@@ -1,4 +1,4 @@
-# app.py (ページ遷移の競合完全修復版 ＋ データの結合・最新値取得修正版 ＋ 1,000行制限回避版 ＋ トレンド検知リンク修正版)
+# app.py (ページ遷移のリンク切れ・フィルター競合完全修復版)
 import re
 import time
 import urllib.request
@@ -685,12 +685,27 @@ if page == "📈 株価・テクニカル分析":
         )
 
         filtered_companies = companies_df.copy()
+        selected_label_state = st.session_state.get("selected_stock_label")
+
+        # 🏷️ テーマフィルター適用（ただしリンクから飛んできた選択中銘柄は除外されないようにする）
         if selected_theme_filter != "全テーマ":
-            filtered_companies = filtered_companies[
-                filtered_companies["themes"]
-                .fillna("")
-                .str.contains(selected_theme_filter)
-            ]
+            if selected_label_state:
+                selected_row = companies_df[companies_df.apply(lambda r: f"{r['code']}: {r['name']}" == selected_label_state, axis=1)]
+                filtered_by_theme = filtered_companies[
+                    filtered_companies["themes"]
+                    .fillna("")
+                    .str.contains(selected_theme_filter)
+                ]
+                if not selected_row.empty and selected_row.iloc[0]["ticker"] not in filtered_by_theme["ticker"].values:
+                    filtered_companies = pd.concat([selected_row, filtered_by_theme]).drop_duplicates(subset=["ticker"])
+                else:
+                    filtered_companies = filtered_by_theme
+            else:
+                filtered_companies = filtered_companies[
+                    filtered_companies["themes"]
+                    .fillna("")
+                    .str.contains(selected_theme_filter)
+                ]
 
         if filtered_companies.empty:
             st.warning(
@@ -714,6 +729,11 @@ if page == "📈 株価・テクニカル分析":
                     filtered_companies["themes"].astype(str).str.lower().str.contains(query_lower)
                 )
                 searched_companies = filtered_companies[mask]
+                # 検索結果にも選択中銘柄がなければ強制追加
+                if selected_label_state:
+                    selected_row = companies_df[companies_df.apply(lambda r: f"{r['code']}: {r['name']}" == selected_label_state, axis=1)]
+                    if not selected_row.empty and selected_row.iloc[0]["ticker"] not in searched_companies["ticker"].values:
+                        searched_companies = pd.concat([selected_row, searched_companies]).drop_duplicates(subset=["ticker"])
             else:
                 searched_companies = filtered_companies
 
