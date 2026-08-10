@@ -1,4 +1,4 @@
-# app.py (ページ遷移・選択ロジック完全修復版)
+# app.py (ページ遷移の競合完全修復版)
 import re
 import time
 import urllib.request
@@ -67,7 +67,6 @@ SECTOR_MAP_JP = {
     "Basic Materials": "素材・化学",
 }
 
-
 # Supabaseクライアントの初期化
 def init_supabase() -> Client:
     url = st.secrets["supabase"]["url"]
@@ -75,7 +74,6 @@ def init_supabase() -> Client:
     return create_client(url, key)
 
 supabase = init_supabase()
-
 
 # Yahoo!ファイナンス(JP)から日本語銘柄名を自動取得
 def fetch_japanese_company_name(code):
@@ -122,7 +120,6 @@ def fetch_japanese_company_name(code):
         pass
     return None
 
-
 # 市場インデックスの取得
 @st.cache_data(ttl=300)
 def fetch_market_indices():
@@ -152,7 +149,6 @@ def fetch_market_indices():
             pass
     return results
 
-
 # RSI計算関数（Wilderの平滑化）
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -165,7 +161,6 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-
 # テーマ一覧の取得
 @st.cache_data(ttl=60)
 def load_themes():
@@ -175,8 +170,7 @@ def load_themes():
         df = df.sort_values("name")
     return df
 
-
-# 銘柄一覧・全指標の取得（Supabase API対応・厳密な日付順最新抽出版）
+# 銘柄一覧・全指標の取得
 @st.cache_data(ttl=60)
 def load_companies():
     res_c = supabase.table("companies").select("*").execute()
@@ -184,7 +178,6 @@ def load_companies():
     if df_c.empty:
         return pd.DataFrame()
 
-    # テーマ情報の結合
     res_ct = supabase.table("company_themes").select("*").execute()
     df_ct = pd.DataFrame(res_ct.data)
 
@@ -202,7 +195,6 @@ def load_companies():
     else:
         df_c["themes"] = ""
 
-    # 株価最新データおよび20日平均出来高の計算と結合
     res_dp = supabase.table("daily_prices").select("ticker, close, volume, sma_25, sma_75, rsi_14, date").execute()
     df_dp = pd.DataFrame(res_dp.data)
 
@@ -250,8 +242,7 @@ def load_companies():
 
     return df_c
 
-
-# 単一銘柄の株価データをフェッチ＆DB保存（差分更新対応）
+# 単一銘柄の株価データをフェッチ＆DB保存
 def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
     if end_date is None:
         end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -296,7 +287,6 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
         records = []
         for date, row in df_to_save.iterrows():
             date_str = date.strftime("%Y-%m-%d")
-
             def safe_val(val):
                 return None if pd.isna(val) else float(val)
 
@@ -321,7 +311,6 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
         today_str = datetime.today().strftime("%Y-%m-%d")
         info = yf.Ticker(ticker).info
         current_price = info.get("currentPrice") or info.get("regularMarketPrice")
-        
         per = info.get("trailingPE") or info.get("forwardPE")
         pbr = info.get("priceToBook")
         
@@ -347,7 +336,6 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
 
         if metrics_data:
             supabase.table("companies").update(metrics_data).eq("ticker", ticker).execute()
-            
             res_check = supabase.table("daily_prices").select("ticker").eq("ticker", ticker).eq("date", today_str).execute()
             if res_check.data:
                 supabase.table("daily_prices").update(metrics_data).eq("ticker", ticker).eq("date", today_str).execute()
@@ -356,7 +344,6 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
         return False
         
     return True
-
 
 # 全銘柄の株価および指標を一括更新
 def refresh_all_stocks_data_smart():
@@ -394,11 +381,9 @@ def refresh_all_stocks_data_smart():
 
     for i in range(0, total_tickers, chunk_size):
         chunk = tickers_list[i:i+chunk_size]
-        
         for ticker in chunk:
             target_info = next((x for x in sorted_tickers if x["ticker"] == ticker), None)
             display_name = f"{target_info['code']}: {target_info['name']}" if target_info else ticker
-            
             try:
                 success = update_stock_prices_in_db(ticker, start_date=None)
                 if success:
@@ -413,7 +398,6 @@ def refresh_all_stocks_data_smart():
 
     st.cache_data.clear()
     return success_count, total_tickers, f"全 {total_tickers} 銘柄中 {success_count} 銘柄のデータを更新しました。", failed_items
-
 
 # 新規銘柄登録 ＆ データ取得
 def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
@@ -493,7 +477,6 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
 
     st.cache_data.clear()
     return True, f"🎉 【{name} ({code})】 を登録し、データを読み込みました！"
-
 
 # ポートフォリオ計算ロジック
 def calculate_portfolio_and_summary():
@@ -598,17 +581,14 @@ def calculate_portfolio_and_summary():
         tx_df,
     )
 
-
 # ----------------------------------------------------
-# Session State 初期化 ＆ ページ遷移フック
+# Session State 初期化 ＆ ページ遷移の安全な管理
 # ----------------------------------------------------
 if "selected_stock_label" not in st.session_state:
     st.session_state["selected_stock_label"] = None
 
-# 外部からページ遷移要求がある場合（銘柄リンククリック等）
-if "requested_page" in st.session_state:
-    st.session_state["nav_radio"] = st.session_state["requested_page"]
-    del st.session_state["requested_page"]
+if "current_page" not in st.session_state:
+    st.session_state["current_page"] = "📈 株価・テクニカル分析"
 
 # ----------------------------------------------------
 # 画面共通：ヘッダー（市場インデックス）表示
@@ -643,17 +623,34 @@ if st.sidebar.button("🔄 全銘柄の株価・指標を更新"):
             st.sidebar.warning(f"⚠️ 以下の {len(failed_list)} 件の更新に失敗しました:\n" + ", ".join(failed_list))
         st.rerun()
 
-page = st.sidebar.radio(
+pages_list = [
+    "📈 株価・テクニカル分析",
+    "🔍 詳細検索（スクリーナー）",
+    "🔥 上昇トレンド検知",
+    "💼 ポートフォリオ＆売買管理",
+    "⚙️ 銘柄登録・管理",
+]
+
+# 現在のページがリストの何番目か取得
+try:
+    default_idx = pages_list.index(st.session_state["current_page"])
+except ValueError:
+    default_idx = 0
+
+# サイドバーのラジオボタン（状態競合を防ぐため独立したキーにする）
+selected_menu = st.sidebar.radio(
     "機能を選択:",
-    [
-        "📈 株価・テクニカル分析",
-        "🔍 詳細検索（スクリーナー）",
-        "🔥 上昇トレンド検知",
-        "💼 ポートフォリオ＆売買管理",
-        "⚙️ 銘柄登録・管理",
-    ],
-    key="nav_radio",
+    pages_list,
+    index=default_idx,
+    key="nav_radio_widget",
 )
+
+# ラジオボタンで選ばれたらセッションステートを更新
+if selected_menu != st.session_state["current_page"]:
+    st.session_state["current_page"] = selected_menu
+    st.rerun()
+
+page = st.session_state["current_page"]
 
 # データをロード
 companies_df = load_companies()
@@ -1081,15 +1078,13 @@ elif page == "🔍 詳細検索（スクリーナー）":
 
                 if cols[1].button(
                     f"🔗 {row['name']}",
-                    key=f"btn_nav_{row['code']}",
+                    key=f"btn_nav_scr_{row['code']}",
                     type="tertiary",
                 ):
                     st.session_state["selected_stock_label"] = (
                         f"{row['code']}: {row['name']}"
                     )
-                    st.session_state["requested_page"] = (
-                        "📈 株価・テクニカル分析"
-                    )
+                    st.session_state["current_page"] = "📈 株価・テクニカル分析"
                     st.rerun()
 
                 cols[2].write(
@@ -1184,7 +1179,7 @@ elif page == "🔥 上昇トレンド検知":
                         st.session_state["selected_stock_label"] = (
                             f"{row['code']}: {row['name']}"
                         )
-                        st.session_state["nav_radio"] = "📈 株価・テクニカル分析"
+                        st.session_state["current_page"] = "📈 株価・テクニカル分析"
                         st.rerun()
 
                     cols[2].write(f"{row['latest_close']:,.1f}円" if pd.notna(row["latest_close"]) else "-")
@@ -1253,7 +1248,7 @@ elif page == "🔥 上昇トレンド検知":
                         st.session_state["selected_stock_label"] = (
                             f"{row['code']}: {row['name']}"
                         )
-                        st.session_state["nav_radio"] = "📈 株価・テクニカル分析"
+                        st.session_state["current_page"] = "📈 株価・テクニカル分析"
                         st.rerun()
 
                     cols[2].write(f"{row['latest_close']:,.1f}円" if pd.notna(row["latest_close"]) else "-")
