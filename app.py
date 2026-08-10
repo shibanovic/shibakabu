@@ -1,4 +1,4 @@
-# app.py (全銘柄最新営業日取得・トレンド検知安定化対応版)
+# app.py (完全決定論・データ揺らぎ完全防止対応版)
 import re
 import time
 import urllib.request
@@ -164,30 +164,28 @@ def calculate_rsi(series, period=14):
 # テーマ一覧の取得
 @st.cache_data(ttl=60)
 def load_themes():
-    res = supabase.table("themes").select("*").execute()
+    res = supabase.table("themes").select("*").order("name").execute()
     df = pd.DataFrame(res.data)
-    if not df.empty and "name" in df.columns:
-        df = df.sort_values("name")
     return df
 
-# 銘柄一覧・全指標の取得（全銘柄の最新営業日を厳密に抽出・固定）
+# 銘柄一覧・全指標の取得（完全決定論・揺らぎ完全防止対応）
 @st.cache_data(ttl=60)
 def load_companies():
-    res_c = supabase.table("companies").select("*").execute()
+    res_c = supabase.table("companies").select("*").order("ticker").execute()
     df_c = pd.DataFrame(res_c.data)
     if df_c.empty:
         return pd.DataFrame()
 
-    res_ct = supabase.table("company_themes").select("*").execute()
+    res_ct = supabase.table("company_themes").select("*").order("ticker").execute()
     df_ct = pd.DataFrame(res_ct.data)
 
-    res_t = supabase.table("themes").select("*").execute()
+    res_t = supabase.table("themes").select("*").order("theme_id").execute()
     df_t = pd.DataFrame(res_t.data)
 
     if not df_ct.empty and not df_t.empty:
         df_t_map = df_t.set_index("theme_id")["name"].to_dict()
         df_ct["theme_name"] = df_ct["theme_id"].map(df_t_map)
-        themes_grouped = df_ct.groupby("ticker")["theme_name"].apply(
+        themes_grouped = df_ct.groupby("ticker", sort=False)["theme_name"].apply(
             lambda x: ", ".join([str(v) for v in x if pd.notna(v)])
         ).reset_index()
         themes_grouped.rename(columns={"theme_name": "themes"}, inplace=True)
@@ -195,12 +193,19 @@ def load_companies():
     else:
         df_c["themes"] = ""
 
-    # Supabaseの1,000行制限を回避してdaily_pricesを全件ループ取得
+    # 💡 【完全対策】Supabaseからの取得時に order を完全固定してページネーションの揺らぎをシャットアウト
     df_dp_list = []
     chunk_size = 1000
     offset = 0
     while True:
-        res_dp = supabase.table("daily_prices").select("ticker, close, volume, sma_25, sma_75, rsi_14, date").range(offset, offset + chunk_size - 1).execute()
+        res_dp = (
+            supabase.table("daily_prices")
+            .select("ticker, close, volume, sma_25, sma_75, rsi_14, date")
+            .order("ticker", desc=False)
+            .order("date", desc=False)
+            .range(offset, offset + chunk_size - 1)
+            .execute()
+        )
         if not res_dp.data:
             break
         df_dp_list.extend(res_dp.data)
@@ -213,16 +218,16 @@ def load_companies():
     if not df_dp.empty:
         df_dp["date"] = pd.to_datetime(df_dp["date"])
         
-        # 💡 【修正ポイント】処理の揺らぎを防ぐため、必ず ticker と date で昇順ソートしてから集計する
-        df_dp = df_dp.sort_values(["ticker", "date"], ascending=[True, True])
+        # 💡 安定ソート（mergesort）により順序を完全に固定
+        df_dp = df_dp.sort_values(["ticker", "date"], ascending=[True, True], kind="mergesort")
         
         # 20日平均出来高の計算
-        df_dp["vol_sma_20"] = df_dp.groupby("ticker")["volume"].transform(
+        df_dp["vol_sma_20"] = df_dp.groupby("ticker", sort=False)["volume"].transform(
             lambda x: x.rolling(window=20, min_periods=1).mean()
         )
 
-        # 各銘柄の時系列における「最新の行」を確実に1件ずつ抽出（keep='last' で最新日を特定）
-        idx = df_dp.groupby("ticker")["date"].idxmax()
+        # 各銘柄の時系列における「最新の行」を確実に1件ずつ抽出
+        idx = df_dp.groupby("ticker", sort=False)["date"].idxmax()
         latest_dp = df_dp.loc[idx].copy()
         
         latest_dp.rename(columns={
@@ -255,7 +260,7 @@ def load_companies():
             df_c[col] = pd.to_numeric(df_c[col], errors="coerce")
 
     if "code" in df_c.columns:
-        df_c = df_c.sort_values(by="code", ascending=True)
+        df_c = df_c.sort_values(by="code", ascending=True, kind="mergesort")
 
     return df_c
 
@@ -283,7 +288,6 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
             start_date = (datetime.today() - timedelta(days=730)).strftime("%Y-%m-%d")
 
     try:
-        # インジケーター計算のために余裕を持って少し前（150日前）からデータを取得
         calc_start_dt = datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=150)
         fetch_start_date = calc_start_dt.strftime("%Y-%m-%d")
 
@@ -299,19 +303,16 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
         df["sma_75"] = df["Close"].rolling(window=75).mean()
         df["rsi_14"] = calculate_rsi(df["Close"], 14)
 
-        # MACD (12, 26, 9)
         exp12 = df["Close"].ewm(span=12, adjust=False).mean()
         exp26 = df["Close"].ewm(span=26, adjust=False).mean()
         df["macd"] = exp12 - exp26
         df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
 
-        # ボリンジャーバンド (20日, 2σ)
         bb_sma = df["Close"].rolling(window=20).mean()
         bb_std = df["Close"].rolling(window=20).std()
         df["bb_upper"] = bb_sma + (bb_std * 2)
         df["bb_lower"] = bb_sma - (bb_std * 2)
 
-        # ATR (14日)
         high_low = df["High"] - df["Low"]
         high_close = (df["High"] - df["Close"].shift()).abs()
         low_close = (df["Low"] - df["Close"].shift()).abs()
@@ -387,17 +388,17 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
 
 # 全銘柄の株価および指標を一括更新
 def refresh_all_stocks_data_smart():
-    res = supabase.table("companies").select("ticker, code, name").execute()
+    res = supabase.table("companies").select("ticker, code, name").order("ticker").execute()
     tickers_data = res.data
     if not tickers_data:
         return 0, 0, "登録されている銘柄がありません。", []
 
-    res_dp = supabase.table("daily_prices").select("ticker, date").execute()
+    res_dp = supabase.table("daily_prices").select("ticker, date").order("ticker").order("date").execute()
     df_dp = pd.DataFrame(res_dp.data)
     
     max_date_dict = {}
     if not df_dp.empty:
-        max_dates = df_dp.groupby("ticker")["date"].max().reset_index()
+        max_dates = df_dp.groupby("ticker", sort=False)["date"].max().reset_index()
         max_date_dict = dict(zip(max_dates["ticker"], max_dates["date"]))
 
     sorted_tickers = []
@@ -527,7 +528,7 @@ def calculate_portfolio_and_summary():
 
     tx_df = pd.DataFrame(tx_raw)
     
-    res_c = supabase.table("companies").select("ticker, code, name").execute()
+    res_c = supabase.table("companies").select("ticker, code, name").order("ticker").execute()
     c_df = pd.DataFrame(res_c.data)
     
     if not c_df.empty:
@@ -536,13 +537,13 @@ def calculate_portfolio_and_summary():
         tx_df["code"] = ""
         tx_df["name"] = ""
 
-    res_dp = supabase.table("daily_prices").select("ticker, close, date").execute()
+    res_dp = supabase.table("daily_prices").select("ticker, close, date").order("ticker").order("date").execute()
     df_dp = pd.DataFrame(res_dp.data)
     
     price_dict = {}
     if not df_dp.empty:
         df_dp["date"] = pd.to_datetime(df_dp["date"])
-        idx = df_dp.groupby("ticker")["date"].idxmax()
+        idx = df_dp.groupby("ticker", sort=False)["date"].idxmax()
         latest_prices = df_dp.loc[idx]
         price_dict = dict(zip(latest_prices["ticker"], latest_prices["close"]))
 
@@ -1432,7 +1433,7 @@ elif page == "💼 ポートフォリオ＆売買管理":
                 use_container_width=True,
             )
 
-            st.markdown("#### 🗑️ 取引の削除")
+            st.markdown("### 🗑️ 取引の削除")
             del_id = st.number_input(
                 "削除したい取引の 取引ID を入力", min_value=1, step=1
             )
@@ -1502,7 +1503,7 @@ elif page == "⚙️ 銘柄登録・管理":
                 companies_df["ticker"] == selected_edit_ticker
             ].iloc[0]
 
-            cur_themes_res = supabase.table("company_themes").select("theme_id").eq("ticker", selected_edit_ticker).execute()
+            cur_themes_res = supabase.table("company_themes").select("theme_id").eq("ticker", selected_edit_ticker).order("theme_id").execute()
             current_theme_ids = [item["theme_id"] for item in cur_themes_res.data]
 
             with st.form("edit_company_form"):
