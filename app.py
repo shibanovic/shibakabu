@@ -1,4 +1,4 @@
-# app.py (load_themes追加・完全修正版)
+# app.py (ページ遷移・選択ロジック完全修復版)
 import re
 import time
 import urllib.request
@@ -600,15 +600,12 @@ def calculate_portfolio_and_summary():
 
 
 # ----------------------------------------------------
-# Session State 初期化
+# Session State 初期化 ＆ ページ遷移フック
 # ----------------------------------------------------
-if "current_page" not in st.session_state:
-    st.session_state["current_page"] = "📈 株価・テクニカル分析"
 if "selected_stock_label" not in st.session_state:
     st.session_state["selected_stock_label"] = None
-if "nav_radio" not in st.session_state:
-    st.session_state["nav_radio"] = "📈 株価・テクニカル分析"
 
+# 外部からページ遷移要求がある場合（銘柄リンククリック等）
 if "requested_page" in st.session_state:
     st.session_state["nav_radio"] = st.session_state["requested_page"]
     del st.session_state["requested_page"]
@@ -657,10 +654,8 @@ page = st.sidebar.radio(
     ],
     key="nav_radio",
 )
-st.session_state["current_page"] = page
 
-# ページ切り替えのタイミングで確実に最新データをロード（キャッシュクリアも連動）
-st.cache_data.clear()
+# データをロード
 companies_df = load_companies()
 themes_df = load_themes()
 
@@ -1189,9 +1184,7 @@ elif page == "🔥 上昇トレンド検知":
                         st.session_state["selected_stock_label"] = (
                             f"{row['code']}: {row['name']}"
                         )
-                        st.session_state["requested_page"] = (
-                            "📈 株価・テクニカル分析"
-                        )
+                        st.session_state["nav_radio"] = "📈 株価・テクニカル分析"
                         st.rerun()
 
                     cols[2].write(f"{row['latest_close']:,.1f}円" if pd.notna(row["latest_close"]) else "-")
@@ -1260,9 +1253,7 @@ elif page == "🔥 上昇トレンド検知":
                         st.session_state["selected_stock_label"] = (
                             f"{row['code']}: {row['name']}"
                         )
-                        st.session_state["requested_page"] = (
-                            "📈 株価・テクニカル分析"
-                        )
+                        st.session_state["nav_radio"] = "📈 株価・テクニカル分析"
                         st.rerun()
 
                     cols[2].write(f"{row['latest_close']:,.1f}円" if pd.notna(row["latest_close"]) else "-")
