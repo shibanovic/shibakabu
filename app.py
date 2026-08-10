@@ -1,4 +1,4 @@
-# app.py (ページ遷移の競合完全修復版)
+# app.py (ページ遷移の競合完全修復版 ＋ データの結合・最新値取得修正版)
 import re
 import time
 import urllib.request
@@ -170,7 +170,7 @@ def load_themes():
         df = df.sort_values("name")
     return df
 
-# 銘柄一覧・全指標の取得
+# 銘柄一覧・全指標の取得（安全な最新値結合ロジックに修正）
 @st.cache_data(ttl=60)
 def load_companies():
     res_c = supabase.table("companies").select("*").execute()
@@ -202,11 +202,14 @@ def load_companies():
         df_dp["date"] = pd.to_datetime(df_dp["date"])
         df_dp = df_dp.sort_values(["ticker", "date"])
         
+        # 20日平均出来高の計算
         df_dp["vol_sma_20"] = df_dp.groupby("ticker")["volume"].transform(
             lambda x: x.rolling(window=20, min_periods=1).mean()
         )
 
-        latest_dp = df_dp.loc[df_dp.groupby("ticker")["date"].idxmax()].copy()
+        # 各銘柄の「真の最新日」の行インデックスを確実に取得
+        idx = df_dp.groupby("ticker")["date"].idxmax()
+        latest_dp = df_dp.loc[idx].copy()
         
         latest_dp.rename(columns={
             "close": "latest_close",
@@ -336,9 +339,6 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
 
         if metrics_data:
             supabase.table("companies").update(metrics_data).eq("ticker", ticker).execute()
-            res_check = supabase.table("daily_prices").select("ticker").eq("ticker", ticker).eq("date", today_str).execute()
-            if res_check.data:
-                supabase.table("daily_prices").update(metrics_data).eq("ticker", ticker).eq("date", today_str).execute()
             
     except Exception as e:
         return False
@@ -875,22 +875,7 @@ elif page == "🔍 詳細検索（スクリーナー）":
     if companies_df.empty:
         st.info("登録銘柄がありません。まずは銘柄を追加してください。")
     else:
-        res_dp_latest = supabase.table("daily_prices").select("ticker, close, volume, sma_25, sma_75, rsi_14, date").execute()
-        df_dp_latest = pd.DataFrame(res_dp_latest.data)
-        
         res_df = companies_df.copy()
-        if not df_dp_latest.empty:
-            df_dp_latest["date"] = pd.to_datetime(df_dp_latest["date"])
-            df_dp_latest = df_dp_latest.sort_values(["ticker", "date"])
-            latest_dp = df_dp_latest.loc[df_dp_latest.groupby("ticker")["date"].idxmax()].copy()
-            
-            res_df = res_df.drop(columns=["latest_close", "latest_volume", "latest_sma_25", "latest_sma_75", "latest_rsi"], errors="ignore")
-            res_df = pd.merge(
-                res_df,
-                latest_dp.rename(columns={"close": "latest_close", "volume": "latest_volume", "sma_25": "latest_sma_25", "sma_75": "latest_sma_75", "rsi_14": "latest_rsi"}),
-                on="ticker",
-                how="left"
-            )
 
         for col in ["per", "pbr", "roe", "dividend_yield", "latest_close", "latest_volume", "latest_sma_25", "latest_sma_75", "latest_rsi"]:
             if col in res_df.columns:
