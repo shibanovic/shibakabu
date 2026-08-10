@@ -1,4 +1,4 @@
-# app.py (差分更新・古い順ソート・50件グルーピング・エラーリスト表示対応版)
+# app.py (上昇トレンド検知の最新日結合ロジック修正版)
 import re
 import time
 import urllib.request
@@ -192,7 +192,7 @@ def load_companies():
     else:
         df_c["themes"] = ""
 
-    # 株価最新データおよび20日平均出来高の計算と結合
+    # 株価最新データおよび20日平均出来高の計算と結合（最新日の抽出を確実に修正）
     res_dp = supabase.table("daily_prices").select("ticker, close, volume, sma_25, sma_75, rsi_14, date").execute()
     df_dp = pd.DataFrame(res_dp.data)
 
@@ -204,7 +204,8 @@ def load_companies():
             lambda x: x.rolling(window=20, min_periods=1).mean()
         )
 
-        latest_dp = df_dp.drop_duplicates(subset=["ticker"], keep="last").copy()
+        # 各銘柄の「最も新しい日付の行」を正確に取得する
+        latest_dp = df_dp.loc[df_dp.groupby("ticker")["date"].idxmax()].copy()
         
         latest_dp.rename(columns={
             "close": "latest_close",
@@ -262,24 +263,19 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
         except Exception:
             end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # start_dateが指定されていない場合は、DB内の最新日（MAX(date)）をチェックして差分（翌日以降）を取得
     if start_date is None:
         try:
             res_max = supabase.table("daily_prices").select("date").eq("ticker", ticker).order("date", desc=True).limit(1).execute()
             if res_max.data and len(res_max.data) > 0:
                 last_date_str = res_max.data[0]["date"]
                 last_dt = datetime.strptime(last_date_str, "%Y-%m-%d")
-                # 最終取得日の翌日から取得
                 start_date = (last_dt + timedelta(days=1)).strftime("%Y-%m-%d")
             else:
-                # データが一切ない場合は過去2年分
                 start_date = (datetime.today() - timedelta(days=730)).strftime("%Y-%m-%d")
         except Exception:
             start_date = (datetime.today() - timedelta(days=730)).strftime("%Y-%m-%d")
 
     try:
-        # 念のため、テクニカル指標（SMA25/75, RSI14）の計算に必要な過去データを十分に含めるため、
-        # 差分更新であっても、直近より十分前の期間（最低でも過去100日前）からデータを取得して計算に歪みが出ないようにする
         calc_start_dt = datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=120)
         fetch_start_date = calc_start_dt.strftime("%Y-%m-%d")
 
@@ -294,10 +290,8 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
         df["sma_75"] = df["Close"].rolling(window=75).mean()
         df["rsi_14"] = calculate_rsi(df["Close"], 14)
 
-        # 今回新規に取得・計算した期間のうち、実際にDBへ保存する対象（指定された start_date 以降）に絞り込む
         df_to_save = df.loc[start_date:]
         if df_to_save.empty:
-            # もし新しい日付のデータがなければ終了
             return True
 
         records = []
@@ -365,14 +359,13 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
     return True
 
 
-# 全銘柄の株価および指標を一括更新（古い順ソート ＆ 50件グルーピング ＆ エラーリスト保持版）
+# 全銘柄の株価および指標を一括更新
 def refresh_all_stocks_data_smart():
     res = supabase.table("companies").select("ticker, code, name").execute()
     tickers_data = res.data
     if not tickers_data:
         return 0, 0, "登録されている銘柄がありません。", []
 
-    # 各銘柄の直近最終取得日（MAX(date)）を調べる
     res_dp = supabase.table("daily_prices").select("ticker, date").execute()
     df_dp = pd.DataFrame(res_dp.data)
     
@@ -381,11 +374,10 @@ def refresh_all_stocks_data_smart():
         max_dates = df_dp.groupby("ticker")["date"].max().reset_index()
         max_date_dict = dict(zip(max_dates["ticker"], max_dates["date"]))
 
-    # 銘柄ごとに情報と「最終取得日」を紐付ける（データがない場合は最古の文字列にして優先的に処理させる）
     sorted_tickers = []
     for item in tickers_data:
         ticker = item["ticker"]
-        last_date = max_date_dict.get(ticker, "1970-01-01") # データなしは一番古く扱う
+        last_date = max_date_dict.get(ticker, "1970-01-01")
         sorted_tickers.append({
             "ticker": ticker,
             "code": item["code"],
@@ -393,7 +385,6 @@ def refresh_all_stocks_data_smart():
             "last_date": last_date
         })
 
-    # 最終取得日が古い順（昇順）にソート
     sorted_tickers = sorted(sorted_tickers, key=lambda x: x["last_date"])
     tickers_list = [x["ticker"] for x in sorted_tickers]
 
@@ -402,17 +393,14 @@ def refresh_all_stocks_data_smart():
     chunk_size = 50
     total_tickers = len(tickers_list)
 
-    # 50件ずつグルーピングして処理
     for i in range(0, total_tickers, chunk_size):
         chunk = tickers_list[i:i+chunk_size]
         
         for ticker in chunk:
-            # 該当銘柄の表示用名称を取得
             target_info = next((x for x in sorted_tickers if x["ticker"] == ticker), None)
             display_name = f"{target_info['code']}: {target_info['name']}" if target_info else ticker
             
             try:
-                # 差分更新（start_date=Noneを指定することで自動的に各銘柄のMAX(date)の翌日から取得）
                 success = update_stock_prices_in_db(ticker, start_date=None)
                 if success:
                     success_count += 1
@@ -421,7 +409,6 @@ def refresh_all_stocks_data_smart():
             except Exception:
                 failed_items.append(display_name)
 
-        # グループ処理の合間に長めのウェイト（最後のグループ以外）
         if i + chunk_size < total_tickers:
             time.sleep(8)
 
@@ -429,7 +416,7 @@ def refresh_all_stocks_data_smart():
     return success_count, total_tickers, f"全 {total_tickers} 銘柄中 {success_count} 銘柄のデータを更新しました。", failed_items
 
 
-# 新規銘柄登録 ＆ データ取得（こちらは全量取得）
+# 新規銘柄登録 ＆ データ取得
 def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
     clean_code = code_input.strip().upper()
     ticker = f"{clean_code}.T" if not clean_code.endswith(".T") else clean_code
@@ -499,7 +486,6 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
     
     supabase.table("companies").upsert(company_data, on_conflict="ticker").execute()
 
-    # 新規登録時は過去2年分を全量取得
     end_date = datetime.today().strftime("%Y-%m-%d")
     start_date = (datetime.today() - timedelta(days=730)).strftime("%Y-%m-%d")
     success = update_stock_prices_in_db(ticker, start_date=start_date, end_date=end_date)
@@ -748,7 +734,6 @@ if page == "📈 株価・テクニカル分析":
                 companies_df["ticker"] == selected_ticker
             ].iloc[0]
 
-            # 詳細画面用の個別更新ボタン
             if st.button("🔄 この銘柄のデータを最新に更新（全量取得）"):
                 with st.spinner(f"【{company_info['name']}】のデータを全量取得中..."):
                     end_date = datetime.today().strftime("%Y-%m-%d")
