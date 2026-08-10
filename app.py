@@ -1,4 +1,4 @@
-# app.py (上昇トレンド検知の最新日結合ロジック修正版)
+# app.py (最新日判定およびデータ結合ロジック修正版)
 import re
 import time
 import urllib.request
@@ -166,7 +166,7 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 
-# 銘柄一覧・全指標の取得（Supabase API対応・キャッシュ制御版）
+# 銘柄一覧・全指標の取得（Supabase API対応・日付判定修正版）
 @st.cache_data(ttl=60)
 def load_companies():
     res_c = supabase.table("companies").select("*").execute()
@@ -192,11 +192,12 @@ def load_companies():
     else:
         df_c["themes"] = ""
 
-    # 株価最新データおよび20日平均出来高の計算と結合（最新日の抽出を確実に修正）
+    # 株価最新データおよび20日平均出来高の計算と結合
     res_dp = supabase.table("daily_prices").select("ticker, close, volume, sma_25, sma_75, rsi_14, date").execute()
     df_dp = pd.DataFrame(res_dp.data)
 
     if not df_dp.empty:
+        # 確実に日時型に変換してから並び替え
         df_dp["date"] = pd.to_datetime(df_dp["date"])
         df_dp = df_dp.sort_values(["ticker", "date"])
         
@@ -204,7 +205,7 @@ def load_companies():
             lambda x: x.rolling(window=20, min_periods=1).mean()
         )
 
-        # 各銘柄の「最も新しい日付の行」を正確に取得する
+        # 確実に各銘柄の最新日付の行を抽出
         latest_dp = df_dp.loc[df_dp.groupby("ticker")["date"].idxmax()].copy()
         
         latest_dp.rename(columns={
@@ -216,6 +217,9 @@ def load_companies():
             "rsi_14": "latest_rsi"
         }, inplace=True)
         latest_dp.drop(columns=["date"], inplace=True, errors="ignore")
+
+        # 既存のdf_cから古いlatest列が存在していれば排除してから結合
+        df_c = df_c.drop(columns=["latest_close", "latest_volume", "latest_vol_sma_20", "latest_sma_25", "latest_sma_75", "latest_rsi"], errors="ignore")
         df_c = pd.merge(df_c, latest_dp, on="ticker", how="left")
     else:
         df_c["latest_close"] = None
@@ -240,7 +244,7 @@ def load_companies():
     return df_c
 
 
-# 【上昇トレンド検知用】キャッシュをバイパスして常にDBから最新を取得する関数
+# キャッシュをクリアしてDBから直接再読み込みする関数
 def load_companies_fresh():
     st.cache_data.clear()
     return load_companies()
@@ -655,7 +659,7 @@ page = st.sidebar.radio(
 )
 st.session_state["current_page"] = page
 
-# 上昇トレンド検知画面の場合はキャッシュをバイパスして最新DBを見に行く
+# 上昇トレンド検知画面の場合はキャッシュをクリアしてDBから直接読み込み
 if page == "🔥 上昇トレンド検知":
     companies_df = load_companies_fresh()
 else:
@@ -882,15 +886,18 @@ elif page == "🔍 詳細検索（スクリーナー）":
     if companies_df.empty:
         st.info("登録銘柄がありません。まずは銘柄を追加してください。")
     else:
-        res_dp_latest = supabase.table("daily_prices").select("ticker, close, volume, sma_25, sma_75, rsi_14, date").order("date", desc=True).execute()
+        res_dp_latest = supabase.table("daily_prices").select("ticker, close, volume, sma_25, sma_75, rsi_14, date").execute()
         df_dp_latest = pd.DataFrame(res_dp_latest.data)
         
         res_df = companies_df.copy()
         if not df_dp_latest.empty:
             df_dp_latest["date"] = pd.to_datetime(df_dp_latest["date"])
+            df_dp_latest = df_dp_latest.sort_values(["ticker", "date"])
             latest_dp = df_dp_latest.loc[df_dp_latest.groupby("ticker")["date"].idxmax()].copy()
+            
+            res_df = res_df.drop(columns=["latest_close", "latest_volume", "latest_sma_25", "latest_sma_75", "latest_rsi"], errors="ignore")
             res_df = pd.merge(
-                res_df.drop(columns=["latest_close", "latest_volume", "latest_sma_25", "latest_sma_75", "latest_rsi"], errors="ignore"),
+                res_df,
                 latest_dp.rename(columns={"close": "latest_close", "volume": "latest_volume", "sma_25": "latest_sma_25", "sma_75": "latest_sma_75", "rsi_14": "latest_rsi"}),
                 on="ticker",
                 how="left"
