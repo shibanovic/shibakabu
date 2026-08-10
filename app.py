@@ -1,4 +1,4 @@
-# app.py (ページ遷移のリンク切れ・フィルター競合完全修復版)
+# app.py (リンク遷移・フィルター競合完全解決版)
 import re
 import time
 import urllib.request
@@ -687,7 +687,7 @@ if page == "📈 株価・テクニカル分析":
         filtered_companies = companies_df.copy()
         selected_label_state = st.session_state.get("selected_stock_label")
 
-        # 🏷️ テーマフィルター適用（ただしリンクから飛んできた選択中銘柄は除外されないようにする）
+        # 🏷️ テーマフィルター適用（リンクからの遷移銘柄が除外されないようにする）
         if selected_theme_filter != "全テーマ":
             if selected_label_state:
                 selected_row = companies_df[companies_df.apply(lambda r: f"{r['code']}: {r['name']}" == selected_label_state, axis=1)]
@@ -729,13 +729,18 @@ if page == "📈 株価・テクニカル分析":
                     filtered_companies["themes"].astype(str).str.lower().str.contains(query_lower)
                 )
                 searched_companies = filtered_companies[mask]
-                # 検索結果にも選択中銘柄がなければ強制追加
                 if selected_label_state:
                     selected_row = companies_df[companies_df.apply(lambda r: f"{r['code']}: {r['name']}" == selected_label_state, axis=1)]
                     if not selected_row.empty and selected_row.iloc[0]["ticker"] not in searched_companies["ticker"].values:
                         searched_companies = pd.concat([selected_row, searched_companies]).drop_duplicates(subset=["ticker"])
             else:
                 searched_companies = filtered_companies
+
+            # 🛠️【完全修正】検索結果やフィルターで消えないように、選択中銘柄を最優先で候補リストに必ず含める
+            if selected_label_state:
+                selected_row_all = companies_df[companies_df.apply(lambda r: f"{r['code']}: {r['name']}" == selected_label_state, axis=1)]
+                if not selected_row_all.empty and selected_row_all.iloc[0]["ticker"] not in searched_companies["ticker"].values:
+                    searched_companies = pd.concat([selected_row_all, searched_companies]).drop_duplicates(subset=["ticker"])
 
             if searched_companies.empty:
                 st.sidebar.warning("一致する銘柄が見つかりませんでした。")
@@ -748,7 +753,8 @@ if page == "📈 株価・テクニカル分析":
             option_keys = list(company_options.keys())
 
             if st.session_state["selected_stock_label"] not in option_keys:
-                st.session_state["selected_stock_label"] = option_keys[0]
+                if option_keys:
+                    st.session_state["selected_stock_label"] = option_keys[0]
 
             selected_label = st.sidebar.selectbox(
                 "絞り込み結果から選択", option_keys, key="selected_stock_label"
