@@ -549,17 +549,29 @@ def calculate_portfolio_and_summary():
 
     portfolio = {}
 
+    # 💡 データベースから取得したデータが文字列型やNoneであっても安全に数値変換する処理
+    tx_df["price"] = pd.to_numeric(tx_df["price"], errors="coerce").fillna(0.0)
+    tx_df["quantity"] = pd.to_numeric(tx_df["quantity"], errors="coerce").fillna(0.0)
+
     for _, row in tx_df.iterrows():
         ticker = row["ticker"]
         t_type = row["type"]
-        price = row["price"]
-        qty = row["quantity"]
+        
+        try:
+            price = float(row["price"])
+        except (ValueError, TypeError):
+            price = 0.0
+
+        try:
+            qty = float(row["quantity"])
+        except (ValueError, TypeError):
+            qty = 0.0
 
         if ticker not in portfolio:
             portfolio[ticker] = {
                 "code": row.get("code", ""),
                 "name": row.get("name", ticker),
-                "qty": 0,
+                "qty": 0.0,
                 "total_cost": 0.0,
                 "realized_pnl": 0.0,
             }
@@ -570,12 +582,12 @@ def calculate_portfolio_and_summary():
             p["total_cost"] += price * qty
         elif t_type == "SELL":
             if p["qty"] > 0:
-                avg_price = p["total_cost"] / p["qty"]
+                avg_price = p["total_cost"] / p["qty"] if p["qty"] > 0 else 0.0
                 p["realized_pnl"] += (price - avg_price) * qty
                 p["qty"] -= qty
                 p["total_cost"] -= avg_price * qty
                 if p["qty"] <= 0:
-                    p["qty"] = 0
+                    p["qty"] = 0.0
                     p["total_cost"] = 0.0
 
     portfolio_rows = []
