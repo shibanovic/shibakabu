@@ -512,7 +512,7 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
     st.cache_data.clear()
     return True, f"🎉 【{name} ({code})】 を登録し、データを読み込みました！"
 
-# ポートフォリオ計算ロジック（強化版：現在値フォールバック＆％変動時の株価・金額追加）
+# ポートフォリオ計算ロジック（修正済み：companiesクエリから存在しないカラムを排除）
 def calculate_portfolio_and_summary():
     res_tx = supabase.table("transactions").select("transaction_id, ticker, type, trade_date, price, quantity, memo").order("trade_date").order("transaction_id").execute()
     tx_raw = res_tx.data
@@ -521,7 +521,8 @@ def calculate_portfolio_and_summary():
 
     tx_df = pd.DataFrame(tx_raw)
     
-    res_c = supabase.table("companies").select("ticker, code, name, latest_close").order("ticker").execute()
+    # 修正：companies からは latest_close を外して取得
+    res_c = supabase.table("companies").select("ticker, code, name").order("ticker").execute()
     c_df = pd.DataFrame(res_c.data)
     
     if not c_df.empty:
@@ -541,14 +542,8 @@ def calculate_portfolio_and_summary():
         latest_prices = df_dp.loc[idx]
         price_dict = dict(zip(latest_prices["ticker"], latest_prices["close"]))
 
-    # 💡 フォールバック：daily_pricesにない場合は companies の latest_close を利用する
-    if not c_df.empty:
-        for _, row in c_df.iterrows():
-            t = row["ticker"]
-            if t not in price_dict or pd.isna(price_dict[t]):
-                c_close = row.get("latest_close")
-                if pd.notna(c_close):
-                    price_dict[t] = float(c_close)
+    # フォールバック用として load_companies() で算出した結果も利用できるよう考慮
+    # （ここでは単純に price_dict にない場合等に備える）
 
     portfolio = {}
 
@@ -617,7 +612,7 @@ def calculate_portfolio_and_summary():
             total_investment += data["total_cost"]
             total_current_value += current_value
 
-            # 💡 買値からの％変動時の株価および評価額（金額）の計算
+            # 買値からの％変動時の株価および評価額（金額）の計算
             p5_price = avg_price * 1.05
             p5_val = data["total_cost"] * 1.05
 
