@@ -1,4 +1,4 @@
-# app.py (完全決定論・データ揺らぎ完全防止対応版)
+# app.py (評価損益・％別目標金額対応版)
 import re
 import time
 import urllib.request
@@ -168,7 +168,7 @@ def load_themes():
     df = pd.DataFrame(res.data)
     return df
 
-# 銘柄一覧・全指標の取得（完全決定論・揺らぎ完全防止対応）
+# 銘柄一覧・全指標の取得
 @st.cache_data(ttl=60)
 def load_companies():
     res_c = supabase.table("companies").select("*").order("ticker").execute()
@@ -193,7 +193,6 @@ def load_companies():
     else:
         df_c["themes"] = ""
 
-    # 💡 【完全対策】Supabaseからの取得時に order を完全固定してページネーションの揺らぎをシャットアウト
     df_dp_list = []
     chunk_size = 1000
     offset = 0
@@ -217,16 +216,12 @@ def load_companies():
 
     if not df_dp.empty:
         df_dp["date"] = pd.to_datetime(df_dp["date"])
-        
-        # 💡 安定ソート（mergesort）により順序を完全に固定
         df_dp = df_dp.sort_values(["ticker", "date"], ascending=[True, True], kind="mergesort")
         
-        # 20日平均出来高の計算
         df_dp["vol_sma_20"] = df_dp.groupby("ticker", sort=False)["volume"].transform(
             lambda x: x.rolling(window=20, min_periods=1).mean()
         )
 
-        # 各銘柄の時系列における「最新の行」を確実に1件ずつ抽出
         idx = df_dp.groupby("ticker", sort=False)["date"].idxmax()
         latest_dp = df_dp.loc[idx].copy()
         
@@ -297,7 +292,6 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # --- 各種テクニカル指標の計算 ---
         df["change_pct"] = df["Close"].pct_change() * 100
         df["sma_25"] = df["Close"].rolling(window=25).mean()
         df["sma_75"] = df["Close"].rolling(window=75).mean()
@@ -318,7 +312,6 @@ def update_stock_prices_in_db(ticker, start_date=None, end_date=None):
         low_close = (df["Low"] - df["Close"].shift()).abs()
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         df["atr_14"] = true_range.rolling(window=14).mean()
-        # ---------------------------
 
         df_to_save = df.loc[start_date:]
         if df_to_save.empty:
@@ -519,7 +512,7 @@ def register_and_fetch_stock(code_input, custom_name="", custom_sector=""):
     st.cache_data.clear()
     return True, f"🎉 【{name} ({code})】 を登録し、データを読み込みました！"
 
-# ポートフォリオ計算ロジック
+# ポートフォリオ計算ロジック（強化版：現在値フォールバック＆％変動時の株価・金額追加）
 def calculate_portfolio_and_summary():
     res_tx = supabase.table("transactions").select("transaction_id, ticker, type, trade_date, price, quantity, memo").order("trade_date").order("transaction_id").execute()
     tx_raw = res_tx.data
@@ -528,15 +521,16 @@ def calculate_portfolio_and_summary():
 
     tx_df = pd.DataFrame(tx_raw)
     
-    res_c = supabase.table("companies").select("ticker, code, name").order("ticker").execute()
+    res_c = supabase.table("companies").select("ticker, code, name, latest_close").order("ticker").execute()
     c_df = pd.DataFrame(res_c.data)
     
     if not c_df.empty:
-        tx_df = pd.merge(tx_df, c_df, on="ticker", how="left")
+        tx_df = pd.merge(tx_df, c_df[["ticker", "code", "name"]], on="ticker", how="left")
     else:
         tx_df["code"] = ""
         tx_df["name"] = ""
 
+    # daily_prices から最新価格を取得
     res_dp = supabase.table("daily_prices").select("ticker, close, date").order("ticker").order("date").execute()
     df_dp = pd.DataFrame(res_dp.data)
     
@@ -547,9 +541,17 @@ def calculate_portfolio_and_summary():
         latest_prices = df_dp.loc[idx]
         price_dict = dict(zip(latest_prices["ticker"], latest_prices["close"]))
 
+    # 💡 フォールバック：daily_pricesにない場合は companies の latest_close を利用する
+    if not c_df.empty:
+        for _, row in c_df.iterrows():
+            t = row["ticker"]
+            if t not in price_dict or pd.isna(price_dict[t]):
+                c_close = row.get("latest_close")
+                if pd.notna(c_close):
+                    price_dict[t] = float(c_close)
+
     portfolio = {}
 
-    # 💡 データベースから取得したデータが文字列型やNoneであっても安全に数値変換する処理
     tx_df["price"] = pd.to_numeric(tx_df["price"], errors="coerce").fillna(0.0)
     tx_df["quantity"] = pd.to_numeric(tx_df["quantity"], errors="coerce").fillna(0.0)
 
@@ -599,7 +601,11 @@ def calculate_portfolio_and_summary():
         total_realized_pnl += data["realized_pnl"]
         if data["qty"] > 0:
             avg_price = data["total_cost"] / data["qty"]
+            # 現在値を取得（見つからない場合は平均取得単価をフォールバック）
             current_price = price_dict.get(ticker, avg_price)
+            if pd.isna(current_price):
+                current_price = avg_price
+
             current_value = current_price * data["qty"]
             unrealized_pnl = current_value - data["total_cost"]
             unrealized_pnl_pct = (
@@ -610,6 +616,19 @@ def calculate_portfolio_and_summary():
 
             total_investment += data["total_cost"]
             total_current_value += current_value
+
+            # 💡 買値からの％変動時の株価および評価額（金額）の計算
+            p5_price = avg_price * 1.05
+            p5_val = data["total_cost"] * 1.05
+
+            p10_price = avg_price * 1.10
+            p10_val = data["total_cost"] * 1.10
+
+            m3_price = avg_price * 0.97
+            m3_val = data["total_cost"] * 0.97
+
+            m5_price = avg_price * 0.95
+            m5_val = data["total_cost"] * 0.95
 
             portfolio_rows.append(
                 {
@@ -622,6 +641,14 @@ def calculate_portfolio_and_summary():
                     "現在評価額": round(current_value, 0),
                     "評価損益(円)": round(unrealized_pnl, 0),
                     "評価損益(%)": round(unrealized_pnl_pct, 2),
+                    "+5%株価": round(p5_price, 1),
+                    "+5%評価額": round(p5_val, 0),
+                    "+10%株価": round(p10_price, 1),
+                    "+10%評価額": round(p10_val, 0),
+                    "-3%株価": round(m3_price, 1),
+                    "-3%評価額": round(m3_val, 0),
+                    "-5%株価": round(m5_price, 1),
+                    "-5%評価額": round(m5_val, 0),
                 }
             )
 
@@ -1362,7 +1389,7 @@ elif page == "💼 ポートフォリオ＆売買管理":
         ["保有株式一覧", "➕ 取引を入力する", "📜 売買履歴・削除"]
     )
     with tab1:
-        st.markdown("### 🟢 現在の保有資産一覧")
+        st.markdown("### 🟢 現在の保有資産一覧（買値からの目標・損切ライン付）")
         if not pf_df.empty:
             st.dataframe(pf_df, use_container_width=True)
         else:
