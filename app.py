@@ -1,4 +1,4 @@
-# app.py (評価損益・％別目標金額対応版 / 上昇トレンド検知のテーブル化対応)
+# app.py (上昇トレンド検知に「出来高倍率」項目を追加した最新版)
 import re
 import time
 import urllib.request
@@ -1196,7 +1196,7 @@ elif page == "🔍 詳細検索（スクリーナー）":
             st.warning("条件に該当する銘柄が見つかりませんでした。")
 
 # ----------------------------------------------------
-# 画面 3: 🔥 上昇トレンド検知（テーブル表示に改善）
+# 画面 3: 🔥 上昇トレンド検知（出来高倍率項目を追加）
 # ----------------------------------------------------
 elif page == "🔥 上昇トレンド検知":
     st.title("🔥 上昇トレンド検知ダッシュボード")
@@ -1224,7 +1224,15 @@ elif page == "🔥 上昇トレンド検知":
                 (trend_df1["latest_sma_75"].notna()) &
                 (trend_df1["latest_close"] > trend_df1["latest_sma_25"]) &
                 (trend_df1["latest_sma_25"] > trend_df1["latest_sma_75"])
-            ]
+            ].copy()
+
+            # 出来高倍率の計算 (直近出来高 / 20日平均出来高)
+            filtered_trend_df1["vol_ratio"] = filtered_trend_df1.apply(
+                lambda r: r["latest_volume"] / r["latest_vol_sma_20"] 
+                if pd.notna(r.get("latest_volume")) and pd.notna(r.get("latest_vol_sma_20")) and r["latest_vol_sma_20"] > 0 
+                else None,
+                axis=1
+            )
 
             st.subheader(f"🚀 検知された上昇トレンド銘柄 ({len(filtered_trend_df1)} 件)")
 
@@ -1237,6 +1245,7 @@ elif page == "🔥 上昇トレンド検知":
                     "75日線": filtered_trend_df1["latest_sma_75"].apply(lambda x: f"{x:,.1f}" if pd.notna(x) else "-"),
                     "RSI(14)": filtered_trend_df1["latest_rsi"].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "-"),
                     "出来高": filtered_trend_df1["latest_volume"].apply(lambda x: f"{int(x):,}株" if pd.notna(x) else "-"),
+                    "出来高倍率": filtered_trend_df1["vol_ratio"].apply(lambda x: f"{x:.2f}倍" if pd.notna(x) else "-"),
                     "セクター": filtered_trend_df1["sector"]
                 })
                 st.dataframe(display_df1, use_container_width=True, hide_index=True)
@@ -1266,7 +1275,15 @@ elif page == "🔥 上昇トレンド検知":
                 (trend_df2["latest_volume"] >= trend_df2["latest_vol_sma_20"] * 1.2) &
                 (trend_df2["latest_rsi"].notna()) &
                 (trend_df2["latest_rsi"] <= 70.0)
-            ]
+            ].copy()
+
+            # 出来高倍率の計算 (直近出来高 / 20日平均出来高)
+            filtered_trend_df2["vol_ratio"] = filtered_trend_df2.apply(
+                lambda r: r["latest_volume"] / r["latest_vol_sma_20"] 
+                if pd.notna(r.get("latest_volume")) and pd.notna(r.get("latest_vol_sma_20")) and r["latest_vol_sma_20"] > 0 
+                else None,
+                axis=1
+            )
 
             st.subheader(f"🚀 検知された上昇トレンド銘柄 ({len(filtered_trend_df2)} 件)")
 
@@ -1279,6 +1296,7 @@ elif page == "🔥 上昇トレンド検知":
                     "75日線": filtered_trend_df2["latest_sma_75"].apply(lambda x: f"{x:,.1f}" if pd.notna(x) else "-"),
                     "RSI(14)": filtered_trend_df2["latest_rsi"].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "-"),
                     "出来高": filtered_trend_df2["latest_volume"].apply(lambda x: f"{int(x):,}株" if pd.notna(x) else "-"),
+                    "出来高倍率": filtered_trend_df2["vol_ratio"].apply(lambda x: f"{x:.2f}倍" if pd.notna(x) else "-"),
                     "セクター": filtered_trend_df2["sector"]
                 })
                 st.dataframe(display_df2, use_container_width=True, hide_index=True)
