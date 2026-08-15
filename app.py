@@ -1,4 +1,4 @@
-# app.py (上昇トレンド検知に「出来高倍率」項目を追加した最新版)
+# app.py (上昇トレンド検知に③～⑤の条件を追加した最新版)
 import re
 import time
 import urllib.request
@@ -1196,7 +1196,7 @@ elif page == "🔍 詳細検索（スクリーナー）":
             st.warning("条件に該当する銘柄が見つかりませんでした。")
 
 # ----------------------------------------------------
-# 画面 3: 🔥 上昇トレンド検知（出来高倍率項目を追加）
+# 画面 3: 🔥 上昇トレンド検知（条件追加版）
 # ----------------------------------------------------
 elif page == "🔥 上昇トレンド検知":
     st.title("🔥 上昇トレンド検知ダッシュボード")
@@ -1205,9 +1205,27 @@ elif page == "🔥 上昇トレンド検知":
     if companies_df.empty:
         st.info("登録されている銘柄がありません。")
     else:
-        t1, t2 = st.tabs([
+        # 共通指標の事前計算
+        base_df = companies_df.copy()
+        base_df["vol_ratio"] = base_df.apply(
+            lambda r: r["latest_volume"] / r["latest_vol_sma_20"] 
+            if pd.notna(r.get("latest_volume")) and pd.notna(r.get("latest_vol_sma_20")) and r["latest_vol_sma_20"] > 0 
+            else None,
+            axis=1
+        )
+        base_df["disp_25"] = base_df.apply(
+            lambda r: ((r["latest_close"] - r["latest_sma_25"]) / r["latest_sma_25"]) * 100
+            if pd.notna(r.get("latest_close")) and pd.notna(r.get("latest_sma_25")) and r["latest_sma_25"] > 0
+            else None,
+            axis=1
+        )
+
+        t1, t2, t3, t4, t5 = st.tabs([
             "① 移動平均線（MA）の順序ベース",
-            "② おすすめ総合定義（トレンド＆モメンタム型）"
+            "② おすすめ総合定義（トレンド＆モメンタム型）",
+            "③ 情報通信系上昇トレンド",
+            "④ 底値からの脱出？",
+            "⑤ ヘルスケア系上昇トレンド"
         ])
 
         with t1:
@@ -1217,22 +1235,13 @@ elif page == "🔥 上昇トレンド検知":
             * **特徴**: 中期的な上向きトレンドがキレイに形成されている銘柄を堅実に捉える、王道の順張り定義です。
             """)
 
-            trend_df1 = companies_df.copy()
-            filtered_trend_df1 = trend_df1[
-                (trend_df1["latest_close"].notna()) &
-                (trend_df1["latest_sma_25"].notna()) &
-                (trend_df1["latest_sma_75"].notna()) &
-                (trend_df1["latest_close"] > trend_df1["latest_sma_25"]) &
-                (trend_df1["latest_sma_25"] > trend_df1["latest_sma_75"])
+            filtered_trend_df1 = base_df[
+                (base_df["latest_close"].notna()) &
+                (base_df["latest_sma_25"].notna()) &
+                (base_df["latest_sma_75"].notna()) &
+                (base_df["latest_close"] > base_df["latest_sma_25"]) &
+                (base_df["latest_sma_25"] > base_df["latest_sma_75"])
             ].copy()
-
-            # 出来高倍率の計算 (直近出来高 / 20日平均出来高)
-            filtered_trend_df1["vol_ratio"] = filtered_trend_df1.apply(
-                lambda r: r["latest_volume"] / r["latest_vol_sma_20"] 
-                if pd.notna(r.get("latest_volume")) and pd.notna(r.get("latest_vol_sma_20")) and r["latest_vol_sma_20"] > 0 
-                else None,
-                axis=1
-            )
 
             st.subheader(f"🚀 検知された上昇トレンド銘柄 ({len(filtered_trend_df1)} 件)")
 
@@ -1263,27 +1272,18 @@ elif page == "🔥 上昇トレンド検知":
             * **特徴**: トレンドの勢い（出来高）と過熱感（RSI）を同時にチェックし、ダマシを減らします。
             """)
 
-            trend_df2 = companies_df.copy()
-            filtered_trend_df2 = trend_df2[
-                (trend_df2["latest_close"].notna()) &
-                (trend_df2["latest_sma_25"].notna()) &
-                (trend_df2["latest_sma_75"].notna()) &
-                (trend_df2["latest_close"] > trend_df2["latest_sma_25"]) &
-                (trend_df2["latest_sma_25"] > trend_df2["latest_sma_75"]) &
-                (trend_df2["latest_volume"].notna()) &
-                (trend_df2["latest_vol_sma_20"].notna()) &
-                (trend_df2["latest_volume"] >= trend_df2["latest_vol_sma_20"] * 1.2) &
-                (trend_df2["latest_rsi"].notna()) &
-                (trend_df2["latest_rsi"] <= 70.0)
+            filtered_trend_df2 = base_df[
+                (base_df["latest_close"].notna()) &
+                (base_df["latest_sma_25"].notna()) &
+                (base_df["latest_sma_75"].notna()) &
+                (base_df["latest_close"] > base_df["latest_sma_25"]) &
+                (base_df["latest_sma_25"] > base_df["latest_sma_75"]) &
+                (base_df["latest_volume"].notna()) &
+                (base_df["latest_vol_sma_20"].notna()) &
+                (base_df["latest_volume"] >= base_df["latest_vol_sma_20"] * 1.2) &
+                (base_df["latest_rsi"].notna()) &
+                (base_df["latest_rsi"] <= 70.0)
             ].copy()
-
-            # 出来高倍率の計算 (直近出来高 / 20日平均出来高)
-            filtered_trend_df2["vol_ratio"] = filtered_trend_df2.apply(
-                lambda r: r["latest_volume"] / r["latest_vol_sma_20"] 
-                if pd.notna(r.get("latest_volume")) and pd.notna(r.get("latest_vol_sma_20")) and r["latest_vol_sma_20"] > 0 
-                else None,
-                axis=1
-            )
 
             st.subheader(f"🚀 検知された上昇トレンド銘柄 ({len(filtered_trend_df2)} 件)")
 
@@ -1303,6 +1303,110 @@ elif page == "🔥 上昇トレンド検知":
                 st.info("💡 銘柄の詳細を確認したい場合は、「📈 株価・テクニカル分析」メニューから選択してください。")
             else:
                 st.warning("現在の条件に一致する上昇トレンド銘柄はありませんでした。")
+
+        with t3:
+            st.markdown("### 【③ 情報通信系上昇トレンド】")
+            st.markdown("""
+            * **判定条件**: 
+              1. `セクター`: 情報・通信 もしくは 情報・通信業
+              2. `RSI`: 70 ~ 80
+              3. `株価 ＞ 25日線`: 〇 且つ `25日線 ＞ 75日線`: 〇
+              4. `出来高倍率`: 1.4以上
+              5. `25日乖離率`: 20 ~ 50%
+            """)
+
+            filtered_trend_df3 = base_df[
+                (base_df["sector"].isin(["情報・通信", "情報・通信業"])) &
+                (base_df["latest_rsi"].notna()) & (base_df["latest_rsi"].between(70, 80)) &
+                (base_df["latest_close"].notna()) & (base_df["latest_sma_25"].notna()) &
+                (base_df["latest_close"] > base_df["latest_sma_25"]) &
+                (base_df["latest_sma_75"].notna()) &
+                (base_df["latest_sma_25"] > base_df["latest_sma_75"]) &
+                (base_df["vol_ratio"].notna()) & (base_df["vol_ratio"] >= 1.4) &
+                (base_df["disp_25"].notna()) & (base_df["disp_25"].between(20, 50))
+            ].copy()
+
+            st.subheader(f"🚀 検知された銘柄 ({len(filtered_trend_df3)} 件)")
+
+            if not filtered_trend_df3.empty:
+                display_df3 = pd.DataFrame({
+                    "コード": filtered_trend_df3["code"],
+                    "銘柄名": filtered_trend_df3["name"],
+                    "現在値(円)": filtered_trend_df3["latest_close"].apply(lambda x: f"{x:,.1f}" if pd.notna(x) else "-"),
+                    "RSI(14)": filtered_trend_df3["latest_rsi"].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "-"),
+                    "出来高倍率": filtered_trend_df3["vol_ratio"].apply(lambda x: f"{x:.2f}倍" if pd.notna(x) else "-"),
+                    "25日乖離率": filtered_trend_df3["disp_25"].apply(lambda x: f"{x:+.1f}%" if pd.notna(x) else "-"),
+                    "セクター": filtered_trend_df3["sector"]
+                })
+                st.dataframe(display_df3, use_container_width=True, hide_index=True)
+            else:
+                st.warning("現在の条件に一致する銘柄はありませんでした。")
+
+        with t4:
+            st.markdown("### 【④ 底値からの脱出？】")
+            st.markdown("""
+            * **判定条件**: 
+              1. `RSI`: 30以下
+              2. `株価 ＞ 25日線`: × (株価 ≦ 25日線) 且つ `25日線 ＞ 75日線`: × (25日線 ≦ 75日線)
+              3. `出来高倍率`: 1.2以上
+            """)
+
+            filtered_trend_df4 = base_df[
+                (base_df["latest_rsi"].notna()) & (base_df["latest_rsi"] <= 30) &
+                (base_df["latest_close"].notna()) & (base_df["latest_sma_25"].notna()) &
+                (base_df["latest_close"] <= base_df["latest_sma_25"]) &
+                (base_df["latest_sma_75"].notna()) &
+                (base_df["latest_sma_25"] <= base_df["latest_sma_75"]) &
+                (base_df["vol_ratio"].notna()) & (base_df["vol_ratio"] >= 1.2)
+            ].copy()
+
+            st.subheader(f"🚀 検知された銘柄 ({len(filtered_trend_df4)} 件)")
+
+            if not filtered_trend_df4.empty:
+                display_df4 = pd.DataFrame({
+                    "コード": filtered_trend_df4["code"],
+                    "銘柄名": filtered_trend_df4["name"],
+                    "現在値(円)": filtered_trend_df4["latest_close"].apply(lambda x: f"{x:,.1f}" if pd.notna(x) else "-"),
+                    "RSI(14)": filtered_trend_df4["latest_rsi"].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "-"),
+                    "出来高倍率": filtered_trend_df4["vol_ratio"].apply(lambda x: f"{x:.2f}倍" if pd.notna(x) else "-"),
+                    "セクター": filtered_trend_df4["sector"]
+                })
+                st.dataframe(display_df4, use_container_width=True, hide_index=True)
+            else:
+                st.warning("現在の条件に一致する銘柄はありませんでした。")
+
+        with t5:
+            st.markdown("### 【⑤ ヘルスケア系上昇トレンド】")
+            st.markdown("""
+            * **判定条件**: 
+              1. `セクター`: ヘルスケア・医薬品
+              2. `RSI`: 60以上
+              3. `株価 ＞ 25日線`: 〇 且つ `25日線 ＞ 75日線`: 〇
+            """)
+
+            filtered_trend_df5 = base_df[
+                (base_df["sector"] == "ヘルスケア・医薬品") &
+                (base_df["latest_rsi"].notna()) & (base_df["latest_rsi"] >= 60) &
+                (base_df["latest_close"].notna()) & (base_df["latest_sma_25"].notna()) &
+                (base_df["latest_close"] > base_df["latest_sma_25"]) &
+                (base_df["latest_sma_75"].notna()) &
+                (base_df["latest_sma_25"] > base_df["latest_sma_75"])
+            ].copy()
+
+            st.subheader(f"🚀 検知された銘柄 ({len(filtered_trend_df5)} 件)")
+
+            if not filtered_trend_df5.empty:
+                display_df5 = pd.DataFrame({
+                    "コード": filtered_trend_df5["code"],
+                    "銘柄名": filtered_trend_df5["name"],
+                    "現在値(円)": filtered_trend_df5["latest_close"].apply(lambda x: f"{x:,.1f}" if pd.notna(x) else "-"),
+                    "RSI(14)": filtered_trend_df5["latest_rsi"].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "-"),
+                    "出来高倍率": filtered_trend_df5["vol_ratio"].apply(lambda x: f"{x:.2f}倍" if pd.notna(x) else "-"),
+                    "セクター": filtered_trend_df5["sector"]
+                })
+                st.dataframe(display_df5, use_container_width=True, hide_index=True)
+            else:
+                st.warning("現在の条件に一致する銘柄はありませんでした。")
 
 # ----------------------------------------------------
 # 画面 4: 💼 ポートフォリオ＆売買管理
