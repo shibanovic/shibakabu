@@ -1,4 +1,4 @@
-# app.py (予測シミュレーションタブ追加版)
+# app.py (予測シミュレーション＆テーブル追加版)
 import re
 import time
 import urllib.request
@@ -957,14 +957,17 @@ if page == "📈 株価・テクニカル分析":
                             
                             future_rows.append({
                                 "date": f_date,
+                                "日付": f_date.strftime("%Y/%m/%d"),
                                 "予測(標準)": curr_p,
                                 "強気シナリオ(+1σ)": curr_p + spread,
                                 "弱気シナリオ(-1σ)": curr_p - spread,
                             })
                             
                         future_df = pd.DataFrame(future_rows)
-                        future_df["date_jp"] = future_df["date"].dt.strftime("%Y/%m/%d")
-                        future_df.set_index("date_jp", inplace=True)
+                        
+                        # チャート用インデックス設定
+                        chart_future_df = future_df.copy()
+                        chart_future_df.set_index("日付", inplace=True)
                         
                         chart_history = sim_df.copy()
                         chart_history["date_dt"] = pd.to_datetime(chart_history["date"])
@@ -973,11 +976,11 @@ if page == "📈 株価・テクニカル分析":
                         
                         actual_series = chart_history["close"].rename("実績終値")
                         
-                        plot_df = pd.DataFrame(index=pd.concat([chart_history.index.to_series(), future_df.index.to_series()]).unique())
+                        plot_df = pd.DataFrame(index=pd.concat([chart_history.index.to_series(), chart_future_df.index.to_series()]).unique())
                         plot_df["実績終値"] = actual_series
-                        plot_df["予測(標準)"] = future_df["予測(標準)"]
-                        plot_df["強気シナリオ(+1σ)"] = future_df["強気シナリオ(+1σ)"]
-                        plot_df["弱気シナリオ(-1σ)"] = future_df["弱気シナリオ(-1σ)"]
+                        plot_df["予測(標準)"] = chart_future_df["予測(標準)"]
+                        plot_df["強気シナリオ(+1σ)"] = chart_future_df["強気シナリオ(+1σ)"]
+                        plot_df["弱気シナリオ(-1σ)"] = chart_future_df["弱気シナリオ(-1σ)"]
                         
                         last_idx = chart_history.index[-1]
                         plot_df.loc[last_idx, "予測(標準)"] = last_close
@@ -986,6 +989,18 @@ if page == "📈 株価・テクニカル分析":
                         
                         st.line_chart(plot_df)
                         st.info("💡 **見方**: 実績終値のトレンド（過去20日の傾き）を延長した中心線に対し、時間の経過に伴うリスク（変動幅）を上下のバンド（±1σ）で表しています。")
+
+                        # --- 追加：予測データテーブル ---
+                        st.markdown("### 📋 予測数値詳細（今後20営業日）")
+                        display_future_df = future_df.copy()
+                        st.dataframe(
+                            display_future_df[["日付", "強気シナリオ(+1σ)", "予測(標準)", "弱気シナリオ(-1σ)"]].style.format({
+                                "強気シナリオ(+1σ)": "{:,.1f}円",
+                                "予測(標準)": "{:,.1f}円",
+                                "弱気シナリオ(-1σ)": "{:,.1f}円"
+                            }),
+                            use_container_width=True
+                        )
                     else:
                         st.warning("予測に必要な十分なデータ履歴がありません。")
 
@@ -1708,7 +1723,7 @@ elif page == "⚙️ 銘柄登録・管理":
                         "設定テーマ",
                     ]
                 ],
-                use_container_width=True,
+                use_container_width+True,
             )
 
             st.markdown("---")
