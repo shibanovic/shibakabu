@@ -1,4 +1,4 @@
-# app.py (④のRSI条件を40以下に変更した最新版)
+# app.py (予測シミュレーションタブ追加版)
 import re
 import time
 import urllib.request
@@ -908,8 +908,8 @@ if page == "📈 株価・テクニカル分析":
                 ).dt.strftime("%Y/%m/%d")
                 df_chart.set_index("date_jp", inplace=True)
 
-                tab1, tab2, tab3 = st.tabs(
-                    ["📈 株価＆移動平均線", "📊 RSI指標", "📄 過去データ一覧"]
+                tab1, tab2, tab3, tab4 = st.tabs(
+                    ["📈 株価＆移動平均線", "📊 RSI指標", "🔮 予測シミュレーション", "📄 過去データ一覧"]
                 )
                 with tab1:
                     chart_data = df_chart[["close", "sma_25", "sma_75"]].rename(
@@ -928,6 +928,68 @@ if page == "📈 株価・テクニカル分析":
                     st.line_chart(rsi_chart)
 
                 with tab3:
+                    st.markdown("### 🔮 ボラティリティ＆トレンドベースの将来予測シミュレーション（今後20営業日）")
+                    st.markdown("直近の価格トレンドの傾きと、ボラティリティ（標準偏差）を基に、今後20営業日（約1ヶ月）の値動きの目安（強気・標準・弱気シナリオ）をシミュレーションします。")
+                    
+                    sim_df = df_prices.tail(60).copy()
+                    if len(sim_df) > 10:
+                        last_date = pd.to_datetime(sim_df["date"].iloc[-1])
+                        last_close = sim_df["close"].iloc[-1]
+                        
+                        recent_20 = sim_df.tail(20)
+                        if len(recent_20) > 1:
+                            price_change_rate = (recent_20["close"].iloc[-1] / recent_20["close"].iloc[0]) - 1
+                            daily_trend = price_change_rate / len(recent_20)
+                        else:
+                            daily_trend = 0.0
+                            
+                        daily_vol = sim_df["close"].pct_change().std() * last_close
+                        if pd.isna(daily_vol) or daily_vol == 0:
+                            daily_vol = last_close * 0.01
+
+                        future_dates = pd.bdate_range(start=last_date + timedelta(days=1), periods=20)
+                        future_rows = []
+                        curr_p = last_close
+                        
+                        for i, f_date in enumerate(future_dates, start=1):
+                            curr_p = curr_p * (1 + daily_trend)
+                            spread = daily_vol * (i ** 0.5)
+                            
+                            future_rows.append({
+                                "date": f_date,
+                                "予測(標準)": curr_p,
+                                "強気シナリオ(+1σ)": curr_p + spread,
+                                "弱気シナリオ(-1σ)": curr_p - spread,
+                            })
+                            
+                        future_df = pd.DataFrame(future_rows)
+                        future_df["date_jp"] = future_df["date"].dt.strftime("%Y/%m/%d")
+                        future_df.set_index("date_jp", inplace=True)
+                        
+                        chart_history = sim_df.copy()
+                        chart_history["date_dt"] = pd.to_datetime(chart_history["date"])
+                        chart_history["date_jp"] = chart_history["date_dt"].dt.strftime("%Y/%m/%d")
+                        chart_history.set_index("date_jp", inplace=True)
+                        
+                        actual_series = chart_history["close"].rename("実績終値")
+                        
+                        plot_df = pd.DataFrame(index=pd.concat([chart_history.index.to_series(), future_df.index.to_series()]).unique())
+                        plot_df["実績終値"] = actual_series
+                        plot_df["予測(標準)"] = future_df["予測(標準)"]
+                        plot_df["強気シナリオ(+1σ)"] = future_df["強気シナリオ(+1σ)"]
+                        plot_df["弱気シナリオ(-1σ)"] = future_df["弱気シナリオ(-1σ)"]
+                        
+                        last_idx = chart_history.index[-1]
+                        plot_df.loc[last_idx, "予測(標準)"] = last_close
+                        plot_df.loc[last_idx, "強気シナリオ(+1σ)"] = last_close
+                        plot_df.loc[last_idx, "弱気シナリオ(-1σ)"] = last_close
+                        
+                        st.line_chart(plot_df)
+                        st.info("💡 **見方**: 実績終値のトレンド（過去20日の傾き）を延長した中心線に対し、時間の経過に伴うリスク（変動幅）を上下のバンド（±1σ）で表しています。")
+                    else:
+                        st.warning("予測に必要な十分なデータ履歴がありません。")
+
+                with tab4:
                     jp_prices_df = df_prices.copy()
                     jp_prices_df["date"] = pd.to_datetime(
                         jp_prices_df["date"]
@@ -1196,7 +1258,7 @@ elif page == "🔍 詳細検索（スクリーナー）":
             st.warning("条件に該当する銘柄が見つかりませんでした。")
 
 # ----------------------------------------------------
-# 画面 3: 🔥 上昇トレンド検知（条件追加版）
+# 画面 3: 🔥 上昇トレンド検知
 # ----------------------------------------------------
 elif page == "🔥 上昇トレンド検知":
     st.title("🔥 上昇トレンド検知ダッシュボード")
@@ -1205,7 +1267,6 @@ elif page == "🔥 上昇トレンド検知":
     if companies_df.empty:
         st.info("登録されている銘柄がありません。")
     else:
-        # 共通指標の事前計算
         base_df = companies_df.copy()
         base_df["vol_ratio"] = base_df.apply(
             lambda r: r["latest_volume"] / r["latest_vol_sma_20"] 
@@ -1230,11 +1291,6 @@ elif page == "🔥 上昇トレンド検知":
 
         with t1:
             st.markdown("### 【① 移動平均線（MA）の順序ベース】")
-            st.markdown("""
-            * **判定条件**: `現在値 ＞ 25日移動平均線` かつ `25日移動平均線 ＞ 75日移動平均線`
-            * **特徴**: 中期的な上向きトレンドがキレイに形成されている銘柄を堅実に捉える、王道の順張り定義です。
-            """)
-
             filtered_trend_df1 = base_df[
                 (base_df["latest_close"].notna()) &
                 (base_df["latest_sma_25"].notna()) &
@@ -1244,7 +1300,6 @@ elif page == "🔥 上昇トレンド検知":
             ].copy()
 
             st.subheader(f"🚀 検知された上昇トレンド銘柄 ({len(filtered_trend_df1)} 件)")
-
             if not filtered_trend_df1.empty:
                 display_df1 = pd.DataFrame({
                     "コード": filtered_trend_df1["code"],
@@ -1258,20 +1313,11 @@ elif page == "🔥 上昇トレンド検知":
                     "セクター": filtered_trend_df1["sector"]
                 })
                 st.dataframe(display_df1, use_container_width=True, hide_index=True)
-                st.info("💡 銘柄の詳細を確認したい場合は、「📈 株価・テクニカル分析」メニューから選択してください。")
             else:
                 st.warning("現在の条件に一致する上昇トレンド銘柄はありませんでした。")
 
         with t2:
             st.markdown("### 【② おすすめ総合定義：トレンド＆モメンタム型】")
-            st.markdown("""
-            * **判定条件**: 
-              1. `現在値 ＞ 25日移動平均線` かつ `25日移動平均線 ＞ 75日移動平均線`（中期トレンド）
-              2. `直近の出来高 ＞ 過去20日平均出来高 × 1.2倍以上`（買いのエネルギーが急増）
-              3. `RSI（14日） ≦ 70`（買われすぎて天井になっていない状態）
-            * **特徴**: トレンドの勢い（出来高）と過熱感（RSI）を同時にチェックし、ダマシを減らします。
-            """)
-
             filtered_trend_df2 = base_df[
                 (base_df["latest_close"].notna()) &
                 (base_df["latest_sma_25"].notna()) &
@@ -1286,7 +1332,6 @@ elif page == "🔥 上昇トレンド検知":
             ].copy()
 
             st.subheader(f"🚀 検知された上昇トレンド銘柄 ({len(filtered_trend_df2)} 件)")
-
             if not filtered_trend_df2.empty:
                 display_df2 = pd.DataFrame({
                     "コード": filtered_trend_df2["code"],
@@ -1300,21 +1345,11 @@ elif page == "🔥 上昇トレンド検知":
                     "セクター": filtered_trend_df2["sector"]
                 })
                 st.dataframe(display_df2, use_container_width=True, hide_index=True)
-                st.info("💡 銘柄の詳細を確認したい場合は、「📈 株価・テクニカル分析」メニューから選択してください。")
             else:
                 st.warning("現在の条件に一致する上昇トレンド銘柄はありませんでした。")
 
         with t3:
             st.markdown("### 【③ 情報通信系上昇トレンド】")
-            st.markdown("""
-            * **判定条件**: 
-              1. `セクター`: 情報・通信 もしくは 情報・通信業
-              2. `RSI`: 70 ~ 80
-              3. `株価 ＞ 25日線`: 〇 且つ `25日線 ＞ 75日線`: 〇
-              4. `出来高倍率`: 1.4以上
-              5. `25日乖離率`: 20 ~ 50%
-            """)
-
             filtered_trend_df3 = base_df[
                 (base_df["sector"].isin(["情報・通信", "情報・通信業"])) &
                 (base_df["latest_rsi"].notna()) & (base_df["latest_rsi"].between(70, 80)) &
@@ -1327,7 +1362,6 @@ elif page == "🔥 上昇トレンド検知":
             ].copy()
 
             st.subheader(f"🚀 検知された銘柄 ({len(filtered_trend_df3)} 件)")
-
             if not filtered_trend_df3.empty:
                 display_df3 = pd.DataFrame({
                     "コード": filtered_trend_df3["code"],
@@ -1344,13 +1378,6 @@ elif page == "🔥 上昇トレンド検知":
 
         with t4:
             st.markdown("### 【④ 底値からの脱出？】")
-            st.markdown("""
-            * **判定条件**: 
-              1. `RSI`: 40以下
-              2. `株価 ＞ 25日線`: × (株価 ≦ 25日線) 且つ `25日線 ＞ 75日線`: × (25日線 ≦ 75日線)
-              3. `出来高倍率`: 1.2以上
-            """)
-
             filtered_trend_df4 = base_df[
                 (base_df["latest_rsi"].notna()) & (base_df["latest_rsi"] <= 40) &
                 (base_df["latest_close"].notna()) & (base_df["latest_sma_25"].notna()) &
@@ -1361,7 +1388,6 @@ elif page == "🔥 上昇トレンド検知":
             ].copy()
 
             st.subheader(f"🚀 検知された銘柄 ({len(filtered_trend_df4)} 件)")
-
             if not filtered_trend_df4.empty:
                 display_df4 = pd.DataFrame({
                     "コード": filtered_trend_df4["code"],
@@ -1377,13 +1403,6 @@ elif page == "🔥 上昇トレンド検知":
 
         with t5:
             st.markdown("### 【⑤ ヘルスケア系上昇トレンド】")
-            st.markdown("""
-            * **判定条件**: 
-              1. `セクター`: ヘルスケア・医薬品
-              2. `RSI`: 60以上
-              3. `株価 ＞ 25日線`: 〇 且つ `25日線 ＞ 75日線`: 〇
-            """)
-
             filtered_trend_df5 = base_df[
                 (base_df["sector"] == "ヘルスケア・医薬品") &
                 (base_df["latest_rsi"].notna()) & (base_df["latest_rsi"] >= 60) &
@@ -1394,7 +1413,6 @@ elif page == "🔥 上昇トレンド検知":
             ].copy()
 
             st.subheader(f"🚀 検知された銘柄 ({len(filtered_trend_df5)} 件)")
-
             if not filtered_trend_df5.empty:
                 display_df5 = pd.DataFrame({
                     "コード": filtered_trend_df5["code"],
