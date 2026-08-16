@@ -1,4 +1,4 @@
-# app.py (上昇トレンド検知に③～⑤の条件を追加した最新版)
+# app.py (④のRSI条件を40以下に変更した最新版)
 import re
 import time
 import urllib.request
@@ -1346,13 +1346,13 @@ elif page == "🔥 上昇トレンド検知":
             st.markdown("### 【④ 底値からの脱出？】")
             st.markdown("""
             * **判定条件**: 
-              1. `RSI`: 30以下
+              1. `RSI`: 40以下
               2. `株価 ＞ 25日線`: × (株価 ≦ 25日線) 且つ `25日線 ＞ 75日線`: × (25日線 ≦ 75日線)
               3. `出来高倍率`: 1.2以上
             """)
 
             filtered_trend_df4 = base_df[
-                (base_df["latest_rsi"].notna()) & (base_df["latest_rsi"] <= 30) &
+                (base_df["latest_rsi"].notna()) & (base_df["latest_rsi"] <= 40) &
                 (base_df["latest_close"].notna()) & (base_df["latest_sma_25"].notna()) &
                 (base_df["latest_close"] <= base_df["latest_sma_25"]) &
                 (base_df["latest_sma_75"].notna()) &
