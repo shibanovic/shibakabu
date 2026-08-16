@@ -1723,7 +1723,7 @@ elif page == "⚙️ 銘柄登録・管理":
                         "設定テーマ",
                     ]
                 ],
-                use_container_width+True,
+                use_container_width=True,
             )
 
             st.markdown("---")
